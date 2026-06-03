@@ -1,0 +1,6 @@
+name: git-guard
+version: "1.0.0"
+description: "Intercept destructive git operations (push --delete, push --force) executed via the terminal tool. Blocks them with a message asking the model to use the pre-push hook's env-var bypass instead."
+author: "Hermes Agent (auto-generated)"
+hooks:
+  - pre_tool_call
