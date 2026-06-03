@@ -245,3 +245,5 @@ fi
 | Credentials not persisting | Check `git config --global credential.helper` — must be `store` or `cache` |
 | Multiple GitHub accounts | Use SSH with different keys per host alias in `~/.ssh/config`, or per-repo credential URLs |
 | `gh: command not found` + no sudo | Use git-only Method 1 above — no installation needed |
+| `remote: refusing to allow...create or update workflow` | Classic PAT needs `workflow` scope to push to repos with GitHub Actions. Go to [token settings](https://github.com/settings/tokens) and enable it. Without it, you can still push branches that don't modify `.github/workflows/` at all, but the server-side check may reject even clean branches — the fix is to add the scope. |
+| `Authentication failed` after token scope update | **Stale remote URL.** If the token was regenerated (even on scope update, GitHub may rotate the token value), the remote URL still embeds the old token. Fix: `source ~/.hermes/.env 2>/dev/null && git remote set-url origin "https://username:${GITHUB_TOKEN}@github.com/owner/repo.git"` |
