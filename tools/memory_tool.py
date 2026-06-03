@@ -60,6 +60,58 @@ ENTRY_DELIMITER = "\n§\n"
 
 
 # ---------------------------------------------------------------------------
+# Write-frequency throttle — prevents rapid consecutive writes to the same
+# ##-headed section (e.g. an LLM loop that keeps "updating" the same topic
+# entry every turn).  Configurable via ``memory.write_cooldown_secs`` in
+# config.yaml (default 5.0 seconds).
+# ---------------------------------------------------------------------------
+
+class LastWriteTracker:
+    """Per-section write-frequency throttle.
+
+    Tracks the last-write timestamp per ``## Title`` heading.  If a write
+    to the same heading occurs within the cooldown window, it is skipped
+    (the existing entry is left unchanged and ``add()`` / ``replace()``
+    returns a non-error skip response).
+
+    Thread-safe for GIL-protected I/O (no cross-process coordination).
+    """
+
+    _last_write: Dict[str, float] = {}
+    _default_cooldown_secs: float = 5.0
+
+    @classmethod
+    def should_throttle(cls, heading: str) -> bool:
+        """Check and record a write to *heading*.
+
+        Returns True if a write to *heading* happened within the last
+        ``_default_cooldown_secs`` seconds — the caller should skip the
+        write.  On first call or after cooldown expiry, records the
+        timestamp and returns False (proceed with write).
+
+        A heading of ``""`` (no heading detected) is never throttled.
+        """
+        if not heading or cls._default_cooldown_secs <= 0:
+            return False
+        now = time.time()
+        last = cls._last_write.get(heading)
+        if last is not None and (now - last) < cls._default_cooldown_secs:
+            return True
+        cls._last_write[heading] = now
+        return False
+
+    @classmethod
+    def configure(cls, cooldown_secs: float) -> None:
+        """Set the global cooldown.  Pass ``<= 0`` to disable throttling."""
+        cls._default_cooldown_secs = cooldown_secs
+
+    @classmethod
+    def reset(cls) -> None:
+        """Clear all tracked timestamps (for testing)."""
+        cls._last_write.clear()
+
+
+# ---------------------------------------------------------------------------
 # Memory content scanning — lightweight check for injection/exfiltration
 # in content that gets injected into the system prompt.
 #
@@ -121,11 +173,15 @@ class MemoryStore:
         Tool responses always reflect this live state.
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375,
+                 write_cooldown_secs: float = 5.0):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self._write_cooldown_secs = write_cooldown_secs
+        # Configure global throttle on first instantiation (idempotent for subsequent instances)
+        LastWriteTracker.configure(write_cooldown_secs)
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
 
@@ -294,8 +350,29 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
+    @staticmethod
+    def _extract_heading(content: str) -> Optional[str]:
+        """Extract the first ``## Title`` heading line from content, if any.
+
+        Returns the full heading line (e.g. ``## Project Setup``) or None.
+        Used by the replace-priority mechanism in ``add()`` to detect when
+        the LLM is updating an existing topic rather than appending.
+        """
+        for line in content.split("\n"):
+            line = line.strip()
+            if line.startswith("## "):
+                return line
+        return None
+
     def add(self, target: str, content: str) -> Dict[str, Any]:
-        """Append a new entry. Returns error if it would exceed the char limit."""
+        """Append a new entry. Returns error if it would exceed the char limit.
+
+        Replace-priority: if the new content starts with a ``## Title``
+        heading, we first search existing entries for one containing the
+        same heading. If found, we REPLACE that entry in-place instead
+        of appending — this prevents duplicate sections when the LLM
+        updates topic knowledge.
+        """
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
@@ -321,6 +398,39 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
+            # ── Write-frequency throttle ──────────────────────────────
+            # Extract the ## heading (if any) and check the cooldown.
+            heading = self._extract_heading(content)
+            if heading and LastWriteTracker.should_throttle(heading):
+                return self._success_response(
+                    target,
+                    f"Write throttled (topic '{heading}' written recently; entry unchanged).",
+                )
+
+            # ── Replace-priority: detect ## heading match ──────────────
+            # Re-use ``heading`` from the throttle check above.
+            if heading:
+                # Substring-match the heading text within existing entries
+                matches = [(i, e) for i, e in enumerate(entries) if heading in e]
+                if matches:
+                    idx = matches[0][0]
+                    # Check that replacement stays within the char limit
+                    test_entries = entries.copy()
+                    test_entries[idx] = content
+                    new_total = len(ENTRY_DELIMITER.join(test_entries))
+                    if new_total <= limit:
+                        entries[idx] = content
+                        self._set_entries(target, entries)
+                        self.save_to_disk(target)
+                        return self._success_response(
+                            target,
+                            f"Entry replaced (topic match: '{heading}').",
+                        )
+                    # If the replacement would exceed the limit, fall through
+                    # to the append check below (which will likely also fail,
+                    # but provides a better error message).
+
+            # ── Append logic (fallback) ────────────────────────────────
             # Calculate what the new total would be
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
@@ -383,6 +493,15 @@ class MemoryStore:
 
             idx = matches[0][0]
             limit = self._char_limit(target)
+
+            # ── Write-frequency throttle ────────────────────────────────
+            target_entry = entries[idx]
+            heading = self._extract_heading(target_entry)
+            if heading and LastWriteTracker.should_throttle(heading):
+                return self._success_response(
+                    target,
+                    f"Write throttled (topic '{heading}' written recently; entry unchanged).",
+                )
 
             # Check that replacement doesn't blow the budget
             test_entries = entries.copy()
@@ -491,8 +610,50 @@ class MemoryStore:
         return f"{separator}\n{header}\n{separator}\n{content}"
 
     @staticmethod
+    def _split_by_sections(raw: str) -> List[str]:
+        """Parse a memory file supporting two formats (auto-detect):
+
+        1. §-delimited (legacy): entries separated by ``\\n§\\n``.
+        2. ##-sectioned: each ``## Title`` line starts a new entry; content
+           before the first ``##`` is treated as preamble and stored as an
+           entry only if it is non-empty.
+
+        Returns a list of entry strings (stripped, empty entries removed).
+        """
+        stripped = raw.strip()
+        if not stripped:
+            return []
+
+        # Strategy 1 — §-delimited (legacy, preferred when § is present)
+        if ENTRY_DELIMITER in stripped:
+            entries = [e.strip() for e in stripped.split(ENTRY_DELIMITER)]
+            return [e for e in entries if e]
+
+        # Strategy 2 — ##-sectioned (human-friendly markdown layout)
+        # Each heading boundary starts a new entry. Content before the first
+        # heading is treated as a preamble entry.
+        entries: List[str] = []
+        current_lines: List[str] = []
+        for line in stripped.split("\n"):
+            if line.startswith("## "):
+                if current_lines:
+                    entries.append("\n".join(current_lines).strip())
+                current_lines = [line]
+            else:
+                # Always collect — preamble lines before first ## become
+                # their own entry.
+                current_lines.append(line)
+        if current_lines:
+            entries.append("\n".join(current_lines).strip())
+        return [e for e in entries if e]
+
+    @staticmethod
     def _read_file(path: Path) -> List[str]:
         """Read a memory file and split into entries.
+
+        Supports two on-disk formats (auto-detected):
+          - §-delimited (legacy, ``\\n§\\n`` between entries).
+          - ##-sectioned (``## Title`` as implicit boundaries).
 
         No file locking needed: _write_file uses atomic rename, so readers
         always see either the previous complete file or the new complete file.
@@ -504,13 +665,7 @@ class MemoryStore:
         except (OSError, IOError):
             return []
 
-        if not raw.strip():
-            return []
-
-        # Use ENTRY_DELIMITER for consistency with _write_file. Splitting by "§"
-        # alone would incorrectly split entries that contain "§" in their content.
-        entries = [e.strip() for e in raw.split(ENTRY_DELIMITER)]
-        return [e for e in entries if e]
+        return MemoryStore._split_by_sections(raw)
 
     def _detect_external_drift(self, target: str) -> Optional[str]:
         """Return a backup-path string if on-disk content shows external drift.
@@ -520,7 +675,10 @@ class MemoryStore:
 
         1. Round-trip mismatch — re-parsing and re-serializing the file
            doesn't produce identical bytes (rare; would catch oddly-encoded
-           delimiters).
+           delimiters).  The roundtrip is checked against BOTH the
+           §-delimited parser (legacy) and the ##-sectioned parser (new);
+           if either roundtrips cleanly the file is considered well-formed.
+
         2. Entry-size overflow — any single parsed entry exceeds the
            store's whole-file char limit. The tool budgets the ENTIRE store
            against that limit; no single tool-written entry can exceed it.
@@ -543,16 +701,30 @@ class MemoryStore:
             raw = path.read_text(encoding="utf-8")
         except (OSError, IOError):
             return None
-        if not raw.strip():
+        stripped = raw.strip()
+        if not stripped:
             return None
 
-        parsed = [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]
-        roundtrip = ENTRY_DELIMITER.join(parsed)
+        # --- Roundtrip check (dual-format) ---
+        # Try §-delimited parsing first (legacy), then ##-sectioned.
+        # If EITHER roundtrips, the file is considered tool-shaped.
+        parsed_s = [e.strip() for e in stripped.split(ENTRY_DELIMITER) if e.strip()]
+        roundtrip_s = ENTRY_DELIMITER.join(parsed_s) if parsed_s else ""
+        roundtrip_ok = stripped == roundtrip_s
 
+        if not roundtrip_ok:
+            # §-delim roundtrip failed — try ##-sectioned parser
+            parsed_h = self._split_by_sections(raw)
+            if parsed_h:
+                content_h = ENTRY_DELIMITER.join(parsed_h)
+                roundtrip_ok = stripped == content_h
+
+        # --- Entry-size overflow check ---
+        parsed = self._split_by_sections(raw)
         char_limit = self._char_limit(target)
         max_entry_len = max((len(e) for e in parsed), default=0)
 
-        drift_detected = (raw.strip() != roundtrip) or (max_entry_len > char_limit)
+        drift_detected = (not roundtrip_ok) or (max_entry_len > char_limit)
         if not drift_detected:
             return None
 
