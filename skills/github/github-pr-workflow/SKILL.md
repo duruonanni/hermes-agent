@@ -1,7 +1,7 @@
 ---
 name: github-pr-workflow
 description: "GitHub PR lifecycle: branch, commit, open, CI, merge."
-version: 1.1.0
+version: 1.2.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -14,6 +14,33 @@ metadata:
 # GitHub Pull Request Workflow
 
 Complete guide for managing the PR lifecycle. Each section shows the `gh` way first, then the `git` + `curl` fallback for machines without `gh`.
+
+## Pre-requisite: PR Feasibility
+
+Before starting any PR to an upstream repository, run the `github-pr-feasibility` assessment. Search both open AND closed PRs for overlapping work. If a PR already exists with the same fix, do NOT create a competing PR — ask the user for direction.
+
+> ⚠️ Incident reference (2026-06-03): 5 PRs submitted in 2 hours to upstream, all duplicates or containing unrelated changes including deleted CI workflows. This caused contributor reputation damage. Always check prior art first.
+
+## Pitfall: GitHub PAT Workflow Scope
+
+When pushing to a fork that has GitHub Actions workflow files (`.github/workflows/`), the Personal Access Token needs the `workflow` scope, even if your branch doesn't modify any workflow files.
+
+**Symptom:** `remote rejected: refusing to allow a Personal Access Token to create or update workflow .github/workflows/... without workflow scope`
+
+**Fix:** Go to [GitHub Settings → Tokens](https://github.com/settings/tokens), enable `workflow` scope for classic PATs, or `Actions: Read and Write` for fine-grained PATs.
+
+**Workaround without workflow scope:** Keep changes local only. All branches and commits remain safe on disk — push later when the token is updated.
+
+## Built-in Approvals System
+
+Hermes has a built-in dangerous command detection system in `tools/approval.py`. Before building custom git guardrails, check if the existing system covers your need:
+
+- `git reset --hard` — ✅ already in DANGEROUS_PATTERNS
+- `git push --force` / `git push -f` — ✅ already in DANGEROUS_PATTERNS
+- `git branch -D` — ✅ already in DANGEROUS_PATTERNS
+- `git push --delete <remote> <branch>` — ❌ missing (add one regex, not a whole plugin)
+
+See `references/hermes-builtin-approvals-system.md` for full details.
 
 ## Prerequisites
 
