@@ -1,7 +1,7 @@
 ---
 name: github-pr-workflow
 description: "GitHub PR lifecycle: branch, commit, open, CI, merge."
-version: 1.1.0
+version: 1.3.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -100,6 +100,154 @@ Longer explanation if needed. Wrap at 72 characters.
 ```
 
 Types: `feat`, `fix`, `refactor`, `docs`, `test`, `ci`, `chore`, `perf`
+
+## 2.5 Pre-Push Local Hygiene (Mandatory)
+
+**Apply these checks before any `git push`.** This section prevents the "mixed commit with config pollution" pattern that damages PR history. Skip any of these and you risk contaminating a clean PR branch with unrelated personal changes.
+
+### Check 1: Config / Personal File Tracking
+
+Detect tracked personal config files that should not be in git:
+
+```bash
+# Check if any personal config files are staged or tracked
+git ls-files config.yaml .env cli-config.yaml 2>/dev/null | while read f; do
+  echo "⚠️  WARNING: $f is tracked by git. Personal config files should not be in version control."
+done
+
+# Check what's staged right now
+git diff --cached --name-only | grep -E 'config\.yaml$|\.env$|cli-config\.yaml$|export' && \
+  echo "❌ Staged changes include personal config files. Add to .gitignore first."
+```
+
+**If found:** Do NOT push a commit that tracks personal config. Fix immediately:
+
+```bash
+echo "config.yaml" >> .gitignore
+git rm --cached config.yaml
+git commit -m "chore: gitignore config.yaml — personal config, not source code"
+```
+
+> ⚠️ **Stash trap:** If you `git rm --cached` + gitignore on one branch, then switch to another and try to pop a stash that modifies config.yaml, git will refuse. Cherry-pick specific files from the stash instead:
+> ```bash
+> git checkout stash@{N} -- <specific-files-you-need>
+> git stash drop stash@{N}
+> ```
+
+### Check 2: Branch Name Validation
+
+Verify the branch name follows a recognizable pattern:
+
+```bash
+BRANCH=$(git branch --show-current)
+
+# Pattern: type/description (kebab-case)
+if ! echo "$BRANCH" | grep -qE '^(feature|feat|fix|bugfix|hotfix|chore|docs|refactor|test|ci|release)/[a-z0-9]+(-[a-z0-9]+)*$'; then
+  echo "⚠️  Branch name '$BRANCH' doesn't follow 'type/description' convention."
+  echo "   Suggested: fix/login-redirect, feat/user-auth, chore/upgrade-deps"
+fi
+```
+
+### Check 3: Commit Atomicity Verification
+
+Ensure each commit in the branch contains only one logical change:
+
+```bash
+# Show staged files grouped by area
+echo "=== Staged changes ==="
+git diff --cached --stat
+
+# For commits already in the branch (but not on base):
+BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD upstream/main 2>/dev/null || echo "HEAD~1")
+echo "=== Commits in this branch (vs $BASE) ==="
+git log --oneline "$BASE..HEAD"
+```
+
+**Red flags:**
+- A single commit touches both `config.yaml` AND new scripts → likely mixed
+- A commit modifies `.github/workflows/` alongside feature code → belongs in separate PR
+- A commit's diffstat shows files in 3+ unrelated directories → split it
+
+**Quick split (if the commit is the latest, not pushed):**
+```bash
+# Soft-unstage the top commit, then re-commit each part separately
+git reset --soft HEAD~1
+git add -p    # interactively pick hunks for the first logical change
+git commit -m "fix: first logical change"
+git add -p    # pick the next set
+git commit -m "chore: second logical change"
+# ... repeat until working tree is clean
+```
+
+> If the branch has also drifted from its intended base (e.g., fork PR branch), save the full change set first, reset the branch, then split on a new branch. See `references/commit-atomicity.md` → "Recovery: Splitting a Mixed Commit" for the full procedure.
+
+### Check 4: Fork Sync (Upstream + Fork Branch Drift Detection)
+
+Before pushing to your fork, confirm you're not diverged from upstream AND that your local branch hasn't drifted from the fork's copy:
+
+```bash
+# For repos with an upstream remote
+if git remote | grep -q upstream; then
+  echo "=== Upstream status ==="
+  git fetch upstream 2>&1
+  BEHIND=$(git rev-list --count HEAD..upstream/$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main) 2>/dev/null)
+  AHEAD=$(git rev-list --count upstream/$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)..HEAD 2>/dev/null)
+  echo "Behind upstream: $BEHIND commits"
+  echo "Ahead of upstream: $AHEAD commits"
+  if [ "$BEHIND" -gt 0 ] 2>/dev/null; then
+    echo "❌ Branch is behind upstream. Run: git rebase upstream/$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+  fi
+fi
+
+# Check for local-only commits not on the fork remote (if a fork remote exists besides origin)
+BRANCH=$(git branch --show-current)
+for REMOTE in $(git remote); do
+  if [ "$REMOTE" != "origin" ] && [ "$REMOTE" != "upstream" ]; then
+    git fetch "$REMOTE" "$BRANCH" 2>/dev/null
+    AHEAD=$(git rev-list --count "$REMOTE/$BRANCH..HEAD" 2>/dev/null || echo 0)
+    if [ "$AHEAD" -gt 0 ] 2>/dev/null; then
+      echo "⚠️  Local branch has $AHEAD commits NOT on $REMOTE/$BRANCH (fork copy)"
+      echo "   git log --oneline $REMOTE/$BRANCH..HEAD"
+      echo "   If these don't belong to the PR, create a separate branch for them."
+    fi
+  fi
+done
+```
+
+### Check 5: Commit Message Format Verification
+
+Verify each unpushed commit follows conventional commits:
+
+```bash
+BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD upstream/main 2>/dev/null || echo "HEAD~1")
+git log --format="%h %s" "$BASE..HEAD" | while read hash subject; do
+  if ! echo "$subject" | grep -qE '^(feat|fix|refactor|docs|test|ci|chore|perf|style|build|revert)(\([a-z0-9._-]+\))?!?:\s.+'; then
+    echo "⚠️  Commit $hash: '$subject' doesn't follow conventional commits"
+    echo "   Expected: type(scope): description"
+  fi
+done
+```
+
+### Check 6: Confirm Before Push (For Upstream PR Branches)
+
+If pushing to a fork from which you plan to open an upstream PR:
+
+```bash
+# Show what will land upstream
+echo "=== Summary for user confirmation ==="
+git log --oneline "$BASE..HEAD"
+git diff --stat "$BASE..HEAD"
+echo "---"
+echo "Does this branch contain ONLY changes intended for this PR?"
+```
+
+**If any check fails, do NOT push automatically.** Present findings to the user and ask for direction (split commits, add to .gitignore, rebase, or push anyway with acknowledgment).
+
+### Incident Reference
+
+See `references/commit-atomicity.md` for a real-world case where skipping these checks resulted in 4 unrelated changes in a single commit on a PR branch.
+
+---
 
 ## 3. Pushing and Creating a PR
 
@@ -354,6 +502,86 @@ git push -u origin HEAD
 
 # 8. Merge when green (see Section 6)
 ```
+
+## PR Discipline (Mandatory Gates)
+
+These gates apply BEFORE any PR submission, branch deletion, or force push. Violations here damage the user's GitHub reputation.
+
+### Gate 1: Search Existing PRs First
+
+Before creating any PR to an upstream repository:
+
+```bash
+curl -s "https://api.github.com/search/issues?q=repo:$OWNER/$REPO+type:pr+KEYWORD&per_page=30" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); [print(f'  #{i[\"number\"]} [{i[\"state\"]}] {i[\"title\"]} by @{i[\"user\"][\"login\"]} ({i[\"created_at\"][:10]})') for i in d.get('items',[])]"
+```
+
+Search BOTH open and closed PRs. If any PR already exists with the same fix, show results to the user and ask what to do. Do NOT create a competing PR autonomously.
+
+### Gate 2: Ask Before Any PR Action
+
+| Action | Must ask user? | Why |
+|--------|---------------|-----|
+| Create PR to upstream repo | **YES** | Reputation risk; prior art must be checked |
+| Close PR | **YES** | Irreversible from GitHub's activity log |
+| Reopen PR | **YES** | Force-pushed branches cannot be reopened |
+| Delete remote branch | **YES** | Auto-closes associated PR |
+| Force push | **YES** | Makes PR unreopenable |
+
+### Gate 3: Clean Branch Check
+
+Before pushing, verify the branch contains ONLY intended commits:
+
+```bash
+git log --oneline "origin/$BASE..HEAD" --not --remotes=upstream
+git diff --stat "upstream/$BASE..HEAD"
+```
+
+**Reject if:** the diff includes unrelated config changes, other features, `.github/workflows/` files, or cleanup commits.
+
+### Gate 4: PR Body Links Issues
+
+Every PR body must include `Closes #N` or `Addresses #N` or `See also #N`. Skipping this creates orphan PRs.
+
+### Gate 5: Duplicate Handling
+
+If a reviewer marks your PR as duplicate: do NOT create a replacement. Instead, ask the user: "The same fix exists at #NUM. Should I contribute our verification data there, or do something else?"
+
+### Pitfall: Don't Write a Plugin — Extend the Built-In Approvals System
+
+Hermes already has a built-in dangerous command system in `tools/approval.py`. It intercepts `terminal()` calls via `pre_tool_call` internally (not a plugin) and prompts the user for approval. Its `DANGEROUS_PATTERNS` list already covers:
+
+- `git reset --hard`
+- `git push --force` / `git push -f` (also in `command_allowlist` in config.yaml)
+- `git clean -f`
+- `git branch -D`
+
+**Do NOT write a separate Hermes Plugin (`pre_tool_call` hook) to intercept git operations.** The approvals system already does this at the framework level — a second plugin adds complexity without benefit. Instead:
+
+1. **If a git pattern is missing**, add it to `DANGEROUS_PATTERNS` in `tools/approval.py`.
+2. **If a pattern should bypass approval**, add it to `command_allowlist` in `config.yaml`.
+3. **If you want fine-grained deny/allow per pattern**, use the approvals config sections.
+
+**Currently missing from DANGEROUS_PATTERNS (as of 2026-06-03):** `git push --delete` (`git push <remote> --delete <branch>`). If this operation needs guarding, add a pattern like:
+```python
+(r'\\bgit\\s+push\\b.*--delete\\b', "git push --delete (removes remote branch)")
+```
+
+#### Correct layer division
+
+| What | Layer | Mechanism |
+|------|-------|-----------|
+| Branch naming / config-file / commit atomicity checks | **Layer 1: Git pre-push hook** | Local git hook, runs outside Hermes process. Genuinely new — no built-in replacement. |
+| Destructive git via terminal tool (push --force, --delete, branch -D) | **Layer 2: Hermes approvals system** | Built-in `tools/approval.py` + `approvals.mode`. Extend DANGEROUS_PATTERNS, don't write a plugin. |
+| GitHub API operations (delete branch, close PR via curl) | **Layer 3: pre_tool_call plugin** | Only needed if the GitHub REST API is an attack vector. Rare. |
+
+### Incident Reference
+
+See `references/pr-flood-2026-06-03.md` for the full incident report that generated these gates (5 PRs in 2 hours to upstream, one deleting CI workflows).
+See `references/git-guard-system-2026-06-03.md` for the git pre-push hook deployment that enforces these gates (note: the Plugin layer described there was later found redundant with `tools/approval.py` — see Pitfall above).
+See `references/multi-agent-evaluation-2026-06-03.md` for the multi-agent evaluation that validated and refined these gates against the `local-git-discipline` / `github-issue-pr-discipline` skill proposal.
+
+
 
 ## Useful PR Commands Reference
 
