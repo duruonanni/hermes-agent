@@ -179,7 +179,9 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 
 **Workspace may have stale artifacts.** Especially `dir:` and `worktree` workspaces can have files from previous runs. Read the comment thread — it usually explains why you're running again and what state the workspace is in.
 
-**Don't rely on the CLI when the guidance is available.** The `kanban_*` tools work across all terminal backends (Docker, Modal, SSH). `hermes kanban <verb>` from your terminal tool will fail in containerized backends because the CLI isn't installed there. When in doubt, use the tool.
+**Don't rely on the CLI when the guidance is available.** The `kanban_*` tools work across all terminal backends (Docker, Modal, SSH). `hermes kanban <verb>` from your terminal tool will fail in containerized backends because the CLI isn't installed there. When both are available, use the function tool.
+
+**CLI is the fallback when kanban tools are not in your toolset.** The `kanban` function tools belong to the `kanban` toolset — they are not in every agent's default toolset. When they are absent, use `hermes kanban <subcommand>` via `terminal()` instead. Check with `hermes kanban --help` first to confirm CLI availability; if the command succeeds, proceed with the CLI before reporting to the user that kanban is unavailable. Key quirk: `hermes kanban create` takes the title as a **positional** argument, not `--title`.
 
 ## CLI fallback (for scripting)
 

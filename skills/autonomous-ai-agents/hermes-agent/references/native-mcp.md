@@ -207,9 +207,21 @@ No `mcp_servers` key in `~/.hermes/config.yaml`, or it's empty. Add at least one
 
 Common causes:
 - **Command not found**: The `command` binary isn't on PATH. Ensure `npx`, `uvx`, or the relevant command is installed.
+- **Binary not installed**: For single-binary servers (like OfficeCLI), ensure the binary is downloaded and on PATH. GitHub downloads may need a proxy in China.
 - **Package not found**: For npx servers, the npm package may not exist or may need `-y` in args to auto-install.
 - **Timeout**: The server took too long to start. Increase `connect_timeout`.
 - **Port conflict**: For HTTP servers, the URL may be unreachable.
+- **⚠️ args must be a YAML list, not a JSON string**: `args: '["mcp"]'` is a YAML string containing JSON — Pydantic rejects it with `Input should be a valid list [type=list_type, input_value='["mcp"]', input_type=str]`. Use `args: ["mcp"]` (no quotes around brackets). `hermes config set` stores the value verbatim as a string, so edit `config.yaml` directly. This error causes silent connection failure after 3 retries and the gateway continues running without MCP tools — no crash, just no useful tools.
+- **Config fix requires restart**: After editing `config.yaml`, you must restart the gateway. There is no hot-reload for MCP servers.
+- **400 Bad Request / Unsupported protocol version**: ...
+  ```yaml
+  mcp_servers:
+    my_server:
+      url: http://localhost:xxxx/mcp
+      headers:
+        mcp-protocol-version: "2024-11-05"
+  ```
+  The supported versions depend on the server. To debug: use direct curl with `protocolVersion` in the initialize body to find a compatible version, then pin it in config. Without this override, the gateway will silently fail all 3 connection attempts and log `MCP server 'X' initial connection failed (attempt 3/3), giving up`.
 
 ### "MCP server 'X' requires HTTP transport but mcp.client.streamable_http is not available"
 
@@ -223,7 +235,9 @@ pip install --upgrade mcp
 
 - Check that the server is listed under `mcp_servers` (not `mcp` or `servers`)
 - Ensure the YAML indentation is correct
-- Look at Hermes Agent startup logs for connection messages
+- Verify the `args` value is a YAML list (`["mcp"]`), not a JSON string (`'["mcp"]'`)
+- Look at Hermes Agent startup logs for connection messages — failure to connect logs only a single WARNING line, not an ERROR
+- A config fix does NOT hot-reload — you must restart the gateway: `systemctl --user restart hermes-gateway`
 - Tool names are prefixed with `mcp_{server}_{tool}` -- look for that pattern
 
 ### Connection keeps dropping
@@ -231,6 +245,22 @@ pip install --upgrade mcp
 The client retries up to 5 times with exponential backoff (1s, 2s, 4s, 8s, 16s, capped at 60s). If the server is fundamentally unreachable, it gives up after 5 attempts. Check the server process and network connectivity.
 
 ## Examples
+
+### OfficeCLI (Binary-based Server)
+
+OfficeCLI is a single-binary Office document tool — install manually, then configure as a stdio MCP server:
+
+```yaml
+mcp_servers:
+  officecli:
+    command: officecli
+    args: ["mcp"]          # ← MUST be a YAML list, NOT a JSON string
+    timeout: 60
+```
+
+⚠️ **Common pitfall**: `args: '["mcp"]'` is a JSON string, not a YAML list. Pydantic rejects it with `Input should be a valid list`. Use bare `["mcp"]`. `hermes config set` stores the value verbatim as a string — edit `config.yaml` directly.
+
+See `references/officecli-mcp-setup.md` for full install and troubleshooting.
 
 ### Time Server (uvx)
 
