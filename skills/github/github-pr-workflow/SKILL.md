@@ -74,6 +74,20 @@ Branch naming conventions:
 - `refactor/description` — code restructuring
 - `docs/description` — documentation
 - `ci/description` — CI/CD changes
+- `test/description` — adding or fixing tests
+- `chore/description` — maintenance, dependency updates, config changes
+- `perf/description` — performance improvements
+- `build/description` — build system or external dependency changes
+- `style/description` — code formatting, no functional change
+- `revert/description` — reverting a previous commit
+- `fix/issue-<N>-description` — issue-tracked bug fixes
+
+**Rules:**
+- Use **kebab-case** for description: `feat/add-user-auth` not `feat/AddUserAuth`
+- Use `/` as separator between type and description
+- Keep branch name under 50 chars
+- Reference issue numbers when applicable: `fix/issue-42-login-redirect`
+- Avoid past-tense verbs: use `feat/add-auth` not `feat/added-auth`
 
 ## 2. Making Commits
 
@@ -310,6 +324,19 @@ git branch -d $BRANCH
 ```
 
 Merge methods: `"merge"` (merge commit), `"squash"`, `"rebase"`
+
+### When to Use Each Method
+
+| Scenario | Recommended Method | Why |
+|----------|-------------------|-----|
+| **Feature branch** (single developer) | `squash` | Clean single commit on main, easy to revert |
+| **Feature branch** (multiple devs, meaningful history) | `merge` (merge commit) | Preserves individual commits and co-author credit |
+| **Bug fix branch** (1-2 commits) | `squash` | One atomic fix, easy to cherry-pick to release branches |
+| **Docs / chore / trivial change** | `squash` | No need to preserve granular history |
+| **Long-lived branch** rebased onto main | `rebase` | Linear history, but requires force-push discipline |
+| **Release branch backport** | `merge` (merge commit) | Clear merge point, easy tracking |
+
+**Rule of thumb:** If in doubt, use `squash`. It's the safest default — one clean commit per PR, easy to revert, easy to cherry-pick. Reserve `merge commit` for when the intermediate commits have independent value (e.g. multi-author, or each commit is independently testable).
 
 ### Enable Auto-Merge (curl)
 

@@ -1,7 +1,7 @@
 ---
 name: claude-code
 description: "Delegate coding to Claude Code CLI (features, PRs)."
-version: 2.2.0
+version: 3.0.0
 author: Hermes Agent + Teknium
 license: MIT
 platforms: [linux, macos, windows]
@@ -696,11 +696,135 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
 | Variable | Effect |
 |----------|--------|
 | `ANTHROPIC_API_KEY` | API key for authentication (alternative to OAuth) |
+| `ANTHROPIC_AUTH_TOKEN` | **API key for custom base URLs** — sends as `x-api-key` header. Required when using `ANTHROPIC_BASE_URL` with a third-party provider. Preferred over `ANTHROPIC_API_KEY` for non-Anthropic endpoints. |
+| `ANTHROPIC_BASE_URL` | Custom API endpoint (e.g. `https://api.deepseek.com/anthropic` for DeepSeek). When set, all requests route to this URL. |
+| `ANTHROPIC_MODEL` | Model name override for the Anthropic-compatible endpoint (e.g. `deepseek-v4-pro[1m]`). Only read by Claude Code with custom BASE_URL — not used for Anthropic's own API. |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | Override the model used for Opus-tier reasoning (custom BASE_URL only) |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | Override the model used for Sonnet-tier reasoning (custom BASE_URL only) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Override the model used for Haiku-tier reasoning (custom BASE_URL only) |
+| `CLAUDE_CODE_SIMPLE=1` | Skip OAuth and keychain auth; use `ANTHROPIC_AUTH_TOKEN` directly. REQUIRED when using `ANTHROPIC_BASE_URL` with third-party providers on headless environments. |
 | `CLAUDE_CODE_EFFORT_LEVEL` | Default effort: `low`, `medium`, `high`, `max`, or `auto` |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | Model for sub-agents (custom BASE_URL only, e.g. `deepseek-v4-flash`) |
 | `MAX_THINKING_TOKENS` | Cap thinking tokens (set to `0` to disable thinking entirely) |
 | `MAX_MCP_OUTPUT_TOKENS` | Cap output from MCP servers (default varies; set e.g., `50000`) |
 | `CLAUDE_CODE_NO_FLICKER=1` | Enable alt-screen rendering to eliminate terminal flicker |
 | `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` | Strip credentials from sub-processes for security |
+
+## Hermes-Internal Integration (Python Subprocess)
+
+When Hermes itself needs to call Claude Code (not the user), use the Python subprocess pattern below. This bypasses `~/.bashrc` env vars and directly injects credentials.
+
+### Standard Calling Pattern
+
+```python
+import subprocess as sp, os
+
+# 1. Read DeepSeek API key from .env
+with open('/home/duruo/.hermes/.env', 'r') as f:
+    for line in f:
+        if 'DEEPSEEK_API_KEY' in line and '=' in line:
+            key = line.strip().split('=', 1)[1]
+            break
+
+# 2. Set env for Claude Code with DeepSeek V4 Pro 1M
+env = os.environ.copy()
+env['ANTHROPIC_BASE_URL'] = 'https://api.deepseek.com/anthropic'
+env['ANTHROPIC_AUTH_TOKEN'] = key
+env['ANTHROPIC_MODEL'] = 'deepseek-v4-pro[1m]'
+env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = 'deepseek-v4-pro[1m]'
+env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = 'deepseek-v4-pro[1m]'
+env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = 'deepseek-v4-flash'
+env['CLAUDE_CODE_SUBAGENT_MODEL'] = 'deepseek-v4-flash'
+env['CLAUDE_CODE_EFFORT_LEVEL'] = 'max'
+env['CLAUDE_CODE_SIMPLE'] = '1'       # Skip OAuth, use ANTHROPIC_AUTH_TOKEN
+
+# 3. Run Claude Code in print mode
+result = sp.run(
+    ['/home/duruo/.hermes/node/bin/claude', '--print', prompt],
+    capture_output=True, text=True, timeout=120, env=env
+)
+# result.stdout = response text, result.returncode = exit code
+```
+
+### Helper Script (`scripts/claude_helper.py`)
+
+A reusable helper is available at `scripts/claude_helper.py`:
+
+```python
+from claude_helper import call_claude
+
+response = call_claude("分析这个代码", timeout=120)
+# Returns: {"text": "...", "exit_code": 0}
+```
+
+**Script location:** `~/.hermes/scripts/claude_helper.py`
+
+### Timeout Considerations
+
+| Prompt length | Recommended timeout | Notes |
+|--------------|--------------------|-------|
+| < 100 chars (simple) | 30-60s | Fast response |
+| 100-500 chars (analysis) | 90-120s | May need thinking time |
+| 500-2000 chars (complex) | 120-180s | Can hit DeepSeek thinking limit |
+| > 2000 chars | 180-300s | Split into multiple calls if possible |
+
+**Known issue:** Long prompts (>500 chars) may timeout on DeepSeek V4 Pro when the model engages heavy thinking. Mitigations:
+- Split analysis into separate calls (one per subtopic)
+- Use subagent pattern: collect facts first, then analyze
+- Keep prompts under 500 chars for reliability
+
+## Superpowers Plugin Integration
+
+### What is Superpowers?
+
+Superpowers is an **official Anthropic Claude Code plugin** hosted at `https://claude.com/plugins/superpowers` (75万+ installs). It provides 14 skills for structured development workflows.
+
+### Installation (already done on this machine)
+
+```bash
+# Add the official GitHub repo as a marketplace
+claude plugins marketplace add https://github.com/obra/superpowers
+
+# Install the plugin
+claude plugins install superpowers@superpowers-dev
+```
+
+**Current status:** ✅ Installed v5.1.0, enabled, scope: user
+
+### Available Skills
+
+| Skill | Description |
+|-------|-------------|
+| `subagent-driven-development` | Decompose tasks into parallel sub-agents |
+| `test-driven-development` | RED-GREEN-REFACTOR cycle enforcement |
+| `systematic-debugging` | 4-phase root cause analysis |
+| `writing-plans` | Bite-sized task plans with paths and code |
+| `writing-skills` | Author SKILL.md with frontmatter + validator |
+| `brainstorming` | Creative constraint-based ideation |
+| `dispatching-parallel-agents` | Parallel agent orchestration |
+| `requesting-code-review` | Pre-commit verification pipeline |
+| `receiving-code-review` | Process review feedback |
+| `finishing-a-development-branch` | Complete and clean up branches |
+| `using-git-worktrees` | Git worktree workflow |
+| `using-superpowers` | Superpowers usage guide |
+| `verification-before-completion` | Verify before marking done |
+| `executing-plans` | Execute implementation plans |
+
+Token cost: ~443 tok always-on per session.
+
+### Invoking Superpowers Skills
+
+Skills auto-activate when Claude Code detects matching tasks. To explicitly request a skill, mention it in the prompt:
+
+```python
+prompt = "请使用 systematic-debugging 技能分析这个问题..."
+```
+
+Or in interactive mode: Claude automatically invokes the correct skill based on natural language.
+
+### Compatibility with DeepSeek
+
+✅ **Fully compatible.** Superpowers is a client-side plugin (skills + hooks). It runs locally in the Claude Code process. The backend model (DeepSeek / Anthropic) is irrelevant — the plugin doesn't depend on which API provider serves the LLM.
 
 ## Cost & Performance Tips
 
@@ -727,9 +851,14 @@ Use `/context` in interactive mode to see a colored grid of context usage. Key t
 7. **`--json-schema` needs enough `--max-turns`** — Claude must read files before producing structured output, which takes multiple turns.
 8. **Trust dialog only appears once per directory** — first-time only, then cached.
 9. **Background tmux sessions persist** — always clean up with `tmux kill-session -t <name>` when done.
-10. **Slash commands (like `/commit`) only work in interactive mode** — in `-p` mode, describe the task in natural language instead.
-11. **`--bare` skips OAuth** — requires `ANTHROPIC_API_KEY` env var or an `apiKeyHelper` in settings.
-12. **Context degradation is real** — AI output quality measurably degrades above 70% context window usage. Monitor with `/context` and proactively `/compact`.
+- **Slash commands (like `/commit`) only work in interactive mode** — in `-p` mode, describe the task in natural language instead.
+- **`--bare` skips OAuth** — requires `ANTHROPIC_API_KEY` env var or an `apiKeyHelper` in settings.
+- **API key truncated in shell when writing to config** — When writing `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` to `~/.bashrc` via `sed` or inline `echo`, special characters (especially `$` in tokens like `sk-...`) cause shell interpolation, silently truncating the value (35 chars → 13 chars). The result is a 401 from the API but no clear error in Claude Code's output. **Detect by comparing lengths** — if bashrc key is shorter than the source key, rewrite using Python (not shell). Use `--debug-file` to confirm: `grep 'header\\|401' /tmp/cc_debug.log`.
+- **Check systemd service before deleting directories** — Before `rm -rf` on any Hermes directory under `~/.hermes/`, run `systemctl --user cat hermes-gateway` to check if the service ExecStart points into that directory. Deleting the runtime Python path kills the gateway. On this NUC, the service used to point at `hermes-agent/venv/bin/python` — verify current state with `systemctl --user show hermes-gateway | grep ExecStart`.
+
+For the full third-party provider debugging procedure (auth, timeout, proxy, env var diagnosis), see `references/third-party-provider-debugging.md`.
+
+14. **Long prompts timeout with third-party providers in `--print` mode** — When using a custom `ANTHROPIC_BASE_URL` (e.g. DeepSeek), prompts over ~500 chars in `--print` mode may time out after 120-180s. This is because third-party Anthropic endpoints (DeepSeek, MiMo) can be slower for complex reasoning, and Claude Code's startup overhead (plugin loading, SessionStart hooks, prefetches) adds to total latency. **Mitigations:** (a) keep prompts concise — provide facts as key-value bullets, not prose paragraphs; (b) split one long analysis into 2–3 sequential short prompts; (c) increase `timeout` to 180s+ in the Hermes terminal call; (d) use `--bare` flag to skip plugin/hook startup overhead when you don't need plugins. This limitation does NOT apply when using Anthropic's own API.
 
 ## Rules for Hermes Agents
 
