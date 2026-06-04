@@ -163,6 +163,16 @@ Tell them what you created in plain prose, naming the actual profiles you used:
 
 ## Pitfalls
 
+**Kanban function tools may not be in your toolset.** The `kanban_create`/`kanban_complete`/`kanban_show` function tools belong to the `kanban` toolset — they are NOT in the default core tools. If they aren't in your enabled toolsets, **do not tell the user you can't interact with the kanban board**. Fall back to `hermes kanban <subcommand>` via the `terminal()` tool:
+
+- `hermes kanban create "title" --body "..." [--assignee <profile>] [--parent <id>]` — note: `title` is a **positional** argument, not `--title`; using `--title` causes `unrecognized arguments` error
+- `hermes kanban list` / `hermes kanban ls`
+- `hermes kanban show <id>`
+- `hermes kanban comment <id> "message"`
+- `hermes kanban complete <id> --summary "..."`
+
+This pattern works in any backend where the `hermes` CLI is installed (local, SSH). Capture stderr with `2>&1` since successful creation may exit code 2 with no stdout on some subcommands.
+
 **Inventing profile names that don't exist.** The dispatcher silently fails to spawn unknown assignees — the card just sits in `ready` forever. Always assign to a profile from your Step 0 discovery; ask the user if you're unsure.
 
 **Bundling independent lanes into one card.** If the user asks for two independent outcomes, create two cards. Example: "fix blockers and check model variants" is not one fixer task; create a fixer/engineer card for the fixes and an explorer/researcher card for the variant check, then optionally gate review on both.

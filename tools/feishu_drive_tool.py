@@ -22,9 +22,56 @@ def set_client(client):
     _local.client = client
 
 
+# Module-level cache for self-initialized client
+_fallback_client = None
+_fallback_lock = threading.Lock()
+
+
 def get_client():
-    """Return the lark client for the current thread, or None."""
-    return getattr(_local, "client", None)
+    """Return the lark client for the current thread, or None.
+
+    Falls back to creating a self-initialized client using FEISHU_APP_ID
+    and FEISHU_APP_SECRET from .env when not in a comment event context.
+    """
+    client = getattr(_local, "client", None)
+    if client is not None:
+        return client
+
+    global _fallback_client
+    if _fallback_client is not None:
+        return _fallback_client
+
+    with _fallback_lock:
+        if _fallback_client is not None:
+            return _fallback_client
+        _fallback_client = _make_self_client()
+        return _fallback_client
+
+
+def _make_self_client():
+    """Create a lark client from .env credentials."""
+    import os
+    env_path = os.path.expanduser("~/.hermes/.env")
+    app_id = None
+    app_secret = None
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            k1 = "FEISHU_APP_ID="
+            if line.startswith(k1):
+                app_id = line[len(k1):]
+            k2 = "FEISHU_APP_SECRET="            
+            if line.startswith(k2):
+                app_secret = line[len(k2):]
+    if app_id and app_secret:
+        try:
+            from lark_oapi import Client
+            client = Client.builder().app_id(app_id).app_secret(app_secret).build()
+            logger.info("Created self-initialized Feishu client from .env")
+            return client
+        except Exception as e:
+            logger.warning("Failed to create Feishu client from .env: %s", e)
+    return None
 
 
 def _check_feishu():
