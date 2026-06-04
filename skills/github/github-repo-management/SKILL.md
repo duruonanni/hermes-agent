@@ -586,6 +586,12 @@ git branch --contains <lost-commit-sha>  # Lists branches that have this commit
 
 ---
 
+### Reference: Branch Cleanup & Reorganization
+
+When the repo has mixed commits in a single branch and you need to split into clean feature branches, see `references/branch-cleanup-workflow.md` for the full workflow (backup → reset to upstream → create clean branches → push → verify).
+
+---
+
 ## Quick Reference Table
 
 | Action | gh | git + curl |

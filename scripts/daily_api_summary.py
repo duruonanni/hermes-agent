@@ -89,50 +89,6 @@ def fetch_deepseek_pricing():
         return {'error': str(e), 'source': 'DeepSeek 官方', 'fetched_at': now}
 
 
-def fetch_mimo_pricing():
-    """Fetch MiMo pricing. Uses API + fallback to cached data."""
-    result = {'source': '', 'fetched_at': now, 'models': {}, 'note': ''}
-
-    # Try official pricing page (React SPA - may not get structured data)
-    try:
-        req = urllib.request.Request('https://platform.xiaomimimo.com/pricing',
-            headers={'User-Agent': 'Mozilla/5.0'})
-        resp = urllib.request.urlopen(req, timeout=10)
-        html = resp.read().decode('utf-8', errors='replace')
-        # Minimal extraction - look for any plaintext pricing
-        text = re.sub(r'<[^>]+>', '\n', html)
-        text = re.sub(r'&nbsp;', ' ', text)
-        for line in text.split('\n'):
-            s = line.strip()
-            if any(k in s for k in ['元/', 'token', 'Token', '百万']):
-                result['note'] = s[:200]
-                break
-    except:
-        pass
-
-    # Try to fetch pricing from the models list (some providers include it)
-    env_path = os.path.expanduser('~/.hermes/.env')
-    api_key = None
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith('OPENAI_API_KEY='):
-                api_key = line[len('OPENAI_API_KEY='):]
-                break
-
-    if api_key:
-        try:
-            req = urllib.request.Request('https://token-plan-cn.xiaomimimo.com/v1/models',
-                headers={'Authorization': f'Bearer {api_key}'})
-            resp = urllib.request.urlopen(req, timeout=10)
-            models = json.loads(resp.read().decode())
-            result['available_models'] = [m['id'] for m in models.get('data', [])]
-        except:
-            pass
-
-    return result
-
-
 def get_pricing():
     """Get pricing with cache. Returns dict with DeepSeek + MiMo pricing."""
     cache = {}
@@ -152,16 +108,14 @@ def get_pricing():
         except:
             pass
 
-    if cache_age_safe and cache.get('deepseek') and cache.get('mimo'):
+    if cache_age_safe and cache.get('deepseek'):
         return cache
 
     # Fetch fresh
     ds = fetch_deepseek_pricing()
-    mimo = fetch_mimo_pricing()
     result = {
         'cached_at': now,
         'deepseek': ds,
-        'mimo': mimo,
     }
     try:
         os.makedirs(os.path.dirname(PRICING_CACHE_PATH), exist_ok=True)
@@ -185,30 +139,48 @@ def check_gpt_status():
     except Exception as e:
         return [f"  ❌ 读取 auth.json 失败: {e}"]
 
-    token = auth.get('tokens', {}).get('access_token', '')
-    if not token:
-        return ["  ⚠️ Codex CLI 无 access_token"]
+    id_token = auth.get('tokens', {}).get('id_token', '')
+    access_token = auth.get('tokens', {}).get('access_token', '')
+    if not id_token:
+        return ["  ⚠️ Codex CLI 无 id_token"]
 
-    # Decode JWT payload for account info
+    # Decode id_token JWT for subscription info
     try:
-        payload_b64 = token.split('.')[1]
+        payload_b64 = id_token.split('.')[1]
         padding = 4 - len(payload_b64) % 4
         if padding != 4:
             payload_b64 += '=' * padding
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-        plan = payload.get('https://api.openai.com/auth', {}).get('chatgpt_plan_type', 'unknown')
-        email = payload.get('https://api.openai.com/profile', {}).get('email', 'unknown')
-        exp_ts = payload.get('exp', 0)
+        auth_info = payload.get('https://api.openai.com/auth', {})
+        plan = auth_info.get('chatgpt_plan_type', 'unknown')
+        active_until = auth_info.get('chatgpt_subscription_active_until', '')
+        # Try to get email from access_token
+        email = 'unknown'
+        if access_token:
+            try:
+                a_payload_b64 = access_token.split('.')[1]
+                a_pad = 4 - len(a_payload_b64) % 4
+                if a_pad != 4:
+                    a_payload_b64 += '=' * a_pad
+                a_payload = json.loads(base64.urlsafe_b64decode(a_payload_b64))
+                email = a_payload.get('https://api.openai.com/profile', {}).get('email', 'unknown')
+            except Exception:
+                pass
         from datetime import datetime, timezone
-        exp_dt = datetime.fromtimestamp(exp_ts, tz=timezone.utc).strftime('%Y-%m-%d')
+        if active_until:
+            exp = datetime.fromisoformat(active_until.replace('Z', '+00:00'))
+            remaining = (exp - datetime.now(timezone.utc)).days
+            expiry_str = f"{active_until[:10]} ({remaining} 天)"
+        else:
+            expiry_str = 'unknown'
     except Exception:
         plan = 'unknown'
         email = 'unknown'
-        exp_dt = 'unknown'
+        expiry_str = 'unknown'
 
     result = []
     result.append(f"  ✅ ChatGPT Plus 已绑定 ({email})")
-    result.append(f"  计划: {plan} | Token 到期: {exp_dt}")
+    result.append(f"  计划: {plan} | 订阅到期: {expiry_str}")
     return result
 
 
@@ -258,26 +230,76 @@ def check_codex_status():
                         pass
     result.append(f"  近7天: {count} 次会话 / {total_bytes/1024/1024:.1f} MB")
 
-    # Subscription expiry from id_token
-    auth_path = os.path.expanduser('~/.codex/auth.json')
+    return result
+
+
+# ── Cursor subscription ────────────────────────────────────────
+def check_cursor_status():
+    """Check Cursor subscription status from statsig-cache."""
+    result = []
+
+    # Check cli-config for auth info
+    cli_cfg_path = os.path.expanduser('~/.cursor/cli-config.json')
+    if not os.path.exists(cli_cfg_path):
+        return ["  ⚠️ Cursor 未配置 (无 cli-config.json)"]
+
     try:
-        auth = json.load(open(auth_path))
-        id_token = auth.get('tokens', {}).get('id_token', '')
-        if id_token:
-            payload_b64 = id_token.split('.')[1]
-            padding = 4 - len(payload_b64) % 4
-            if padding != 4:
-                payload_b64 += '=' * padding
-            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-            auth_info = payload.get('https://api.openai.com/auth', {})
-            active_until = auth_info.get('chatgpt_subscription_active_until', '')
-            if active_until:
-                from datetime import datetime, timezone
-                exp = datetime.fromisoformat(active_until.replace('Z', '+00:00'))
-                remaining = (exp - datetime.now(timezone.utc)).days
-                result.append(f"  订阅到期: {active_until[:10]} ({remaining} 天)")
-    except Exception:
-        pass
+        with open(cli_cfg_path) as f:
+            cfg = json.load(f)
+        auth = cfg.get('authInfo', {})
+        email = auth.get('email', 'unknown')
+        result.append(f"  ✅ Cursor 已登录 ({email})")
+    except Exception as e:
+        return [f"  ❌ 读取 Cursor 配置失败: {e}"]
+
+    # Read subscription info from statsig-cache
+    cache_path = os.path.expanduser('~/.cursor/statsig-cache.json')
+    if not os.path.exists(cache_path):
+        result.append("  ⚠️ 无订阅信息 (statsig-cache)")
+        return result
+
+    try:
+        with open(cache_path) as f:
+            cache = json.load(f)
+        data = json.loads(cache.get('data', '{}'))
+        custom = data.get('user', {}).get('custom', {})
+
+        plan = custom.get('stripeMembershipStatus', 'free')
+        sub_status = custom.get('stripeSubscriptionStatus', '')
+        expires = custom.get('stripeMembershipExpiration', '')
+
+        plan_emoji = {'pro': '💼', 'hobby': '🎯', 'free': '⚪', 'business': '🏢'}
+        emoji = plan_emoji.get(plan, '🔌')
+
+        if expires:
+            from datetime import datetime, timezone
+            exp = datetime.fromisoformat(expires.replace('Z', '+00:00'))
+            remaining = (exp - datetime.now(timezone.utc)).days
+            expiry_str = f"{expires[:10]} ({remaining} 天)"
+        else:
+            expiry_str = 'N/A'
+
+        usage_dollars = custom.get('included_usage_dollars', None)
+        # Check if there's usage/limit info
+        if usage_dollars:
+            result.append(f"  {emoji} {plan.title()} | 到期: {expiry_str} | 额度: ${usage_dollars}/月")
+        else:
+            # Try to get from dynamic configs
+            for cfg_id, cfg_val in data.get('dynamic_configs', {}).items():
+                if cfg_val.get('group') == 'launchedGroup':
+                    val = cfg_val.get('value', {})
+                    if val.get('included_usage_dollars'):
+                        usage_dollars = val['included_usage_dollars']
+                        break
+                    if val.get('credit_dollars'):
+                        usage_dollars = val['credit_dollars']
+                        break
+            if usage_dollars:
+                result.append(f"  {emoji} {plan.title()} | 到期: {expiry_str} | 额度: ${usage_dollars}/月")
+            else:
+                result.append(f"  {emoji} {plan.title()} | 到期: {expiry_str}")
+    except Exception as e:
+        result.append(f"  ⚠️ 解析订阅信息失败: {e}")
 
     return result
 
@@ -325,39 +347,24 @@ if api_key:
         data = json.loads(resp.read().decode())
         models = [m['id'] for m in data.get('data', [])]
         lines.append(f"  ✅ API 正常")
-        if len(models) > 4:
-            lines.append(f"     +{len(models)-4} 个模型 (含 TTS)")
     except Exception as e:
         lines.append(f"  ❌ API 异常: {e}")
-
-    found_balance = False
-    for ep in ['/v1/dashboard/billing/credit_grants', '/v1/user/balance']:
-        try:
-            req = urllib.request.Request(f'https://api.xiaomimimo.com{ep}')
-            req.add_header('Authorization', f'Bearer {api_key}')
-            resp = urllib.request.urlopen(req, timeout=10)
-            bal_data = json.loads(resp.read().decode())
-            lines.append(f"  余额 ({ep}): {json.dumps(bal_data, ensure_ascii=False)}")
-            found_balance = True
-            break
-        except urllib.error.HTTPError:
-            pass
-        except Exception as e:
-            lines.append(f"  余额查询失败 ({ep}): {e}")
-
-    if not found_balance:
-        lines.append("  ⚠️ MiMo 无公开余额 API")
-        lines.append("    查看: https://platform.xiaomimimo.com/#/console/balance")
 else:
     lines.append("  ⚠️ 未配置 MiMo API Key")
 
-# 3. Pricing (dynamically fetched)
+# 3. Cursor subscription
+cursor = check_cursor_status()
+lines.append("")
+lines.append("Cursor:")
+for l in cursor:
+    lines.append("  " + l)
+
+# 4. Pricing (dynamically fetched)
 lines.append("")
 lines.append("定价参考 (动态获取):")
 
 pricing = get_pricing()
 ds_p = pricing.get('deepseek', {})
-mimo_p = pricing.get('mimo', {})
 
 # DeepSeek Flash
 flash = ds_p.get('models', {}).get('deepseek-v4-flash', {})
@@ -387,13 +394,7 @@ if pro:
 else:
     lines.append(f"  DeepSeek V4 Pro: 输入 ¥3.1 / 输出 ¥6.2 / M tokens")
 
-# MiMo (post-May-27 price cut)
-# Standard flat pricing (no longer separates input/output per context length)
-mimo_models = mimo_p.get('available_models', [])
-lines.append(f"  MiMo V2.5: ¥2/百万tokens 标准 (缓存命中 ¥0.02/百万)")
-lines.append(f"  MiMo V2.5 Pro: ¥6/百万tokens 标准 (缓存命中 ¥0.025/百万)")
-lines.append(f"     来源: 小米 MiMo 官方 2026-05-27 永久降价公告")
-lines.append(f"     官网: https://platform.xiaomimimo.com/pricing")
+# MiMo — no pricing details shown (user preference)
 
 # Cache timestamp
 lines.append(f"  (价格更新于 {now})")
