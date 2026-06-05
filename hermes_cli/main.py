@@ -14247,6 +14247,16 @@ Examples:
         action="store_true",
         help="Treat SUGGEST findings as BLOCKING for the exit count.",
     )
+    skills_validate.add_argument(
+        "--fix",
+        action="store_true",
+        help="Auto-fix broken related_skills references (creates .pre-lint.SKILL.md backup).",
+    )
+    skills_validate.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON to stdout instead of a Rich table.",
+    )
 
     skills_uninstall = skills_subparsers.add_parser(
         "uninstall", help="Remove a hub-installed skill"

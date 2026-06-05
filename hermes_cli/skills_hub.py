@@ -1013,15 +1013,18 @@ def do_validate(
     target: Optional[str] = None,
     ruleset: str = "hermes",
     strict: bool = False,
+    fix: bool = False,
+    as_json: bool = False,
     console: Optional[Console] = None,
 ) -> int:
     """Validate one or more installed skills against a ruleset.
 
     Static lint pass complementary to the Curator (which is an LLM-driven
     mutation pass). Operates on any skill — bundled, hub-installed, or
-    agent-authored — and never modifies them.
+    agent-authored — and never modifies them unless ``fix`` is True.
 
     Returns the number of skills with BLOCKING findings (0 = all clean).
+    When ``fix`` is True and auto-fixes were applied, returns 2.
 
     Args:
         target: Skill name, path to a SKILL.md, or None to validate every
@@ -1030,17 +1033,23 @@ def do_validate(
                  ruleset file.
         strict: When True, treat SUGGEST findings as BLOCKING in the exit
                 count.
+        fix: When True, auto-fix broken related_skills references (creates
+             .pre-lint.SKILL.md backups before modifying).
+        as_json: When True, output JSON to stdout instead of a Rich table.
     """
     from pathlib import Path
 
     from tools.skills_validator import (
         SEVERITY_BLOCKING,
         SEVERITY_SUGGEST,
+        auto_fix_related_skills,
         build_skill_name_index,
         find_skills,
         load_ruleset,
         validate_skill,
     )
+    # For related_skills extraction during auto-fix
+    from tools.skills_validator import _find_related_skills
 
     c = console or _console
 
@@ -1063,11 +1072,17 @@ def do_validate(
         except Exception:
             hermes_skills = Path.home() / ".hermes" / "skills"
         if not hermes_skills.exists():
-            c.print(f"[dim]No skills directory at {hermes_skills}.[/]\n")
+            if as_json:
+                print(json.dumps({"error": f"No skills directory at {hermes_skills}"}))
+            else:
+                c.print(f"[dim]No skills directory at {hermes_skills}.[/]\n")
             return 0
         targets = find_skills(hermes_skills)
         if not targets:
-            c.print("[dim]No installed skills found.[/]\n")
+            if as_json:
+                print(json.dumps({"error": "No installed skills found.", "results": [], "auto_fixes": []}))
+            else:
+                c.print("[dim]No installed skills found.[/]\n")
             return 0
         # Build cross-reference index once for all-skills validation
         valid_names = build_skill_name_index(hermes_skills)
@@ -1096,48 +1111,124 @@ def do_validate(
                 c.print(f"[bold red]Error:[/] cannot resolve '{target}': {e}\n")
                 return 1
 
+    # --- Auto-fix phase (before validation) ---
+    total_fixed = 0
+    auto_fixes: List[dict] = []
+    if fix and valid_names is not None:
+        for skill_path in targets:
+            skill_md = skill_path / "SKILL.md" if skill_path.is_dir() else skill_path
+            if not skill_md.exists():
+                continue
+            content = skill_md.read_text(encoding="utf-8")
+            # Quick frontmatter parse (same logic as skills_validator)
+            if not content.startswith("---"):
+                continue
+            fm_end = re.search(r"\n---\s*\n", content[3:])
+            if not fm_end:
+                continue
+            yaml_text = content[3 : fm_end.start() + 3]
+            import yaml
+            try:
+                fm = yaml.safe_load(yaml_text)
+            except Exception:
+                continue
+            if not isinstance(fm, dict):
+                continue
+            rs_list = _find_related_skills(fm)
+            broken = [r for r in rs_list if r not in valid_names]
+            if broken:
+                from tools.skills_validator import auto_fix_related_skills as _do_fix
+                if _do_fix(skill_md, broken):
+                    total_fixed += 1
+                    auto_fixes.append({
+                        "skill": skill_md.parent.name,
+                        "file": str(skill_md),
+                        "backup": str(skill_md.with_name(".pre-lint.SKILL.md")),
+                        "fix": f"Removed broken related_skills entries: {broken}",
+                    })
+
+    # --- Validation phase ---
     blocking_skills = 0
     suggest_skills = 0
     clean_skills = 0
 
-    table = Table(title=f"Skill Validation — ruleset: {ruleset_name}")
-    table.add_column("Skill", style="bold cyan")
-    table.add_column("Blocking", justify="right", style="red")
-    table.add_column("Suggest", justify="right", style="yellow")
-    table.add_column("Status", style="dim")
-
-    detailed_findings: List = []
-
+    all_reports = []
     for skill_path in targets:
         report = validate_skill(skill_path, rules, ruleset_name=ruleset_name, valid_names=valid_names)
         b = len(report.blocking)
         s = len(report.suggestions)
         if b > 0:
             blocking_skills += 1
-            status = "[red]BLOCKING[/]"
+            status = "BLOCKING"
         elif s > 0:
             suggest_skills += 1
-            status = "[yellow]SUGGEST[/]"
+            status = "SUGGEST"
         else:
             clean_skills += 1
-            status = "[green]OK[/]"
-        table.add_row(report.skill_name, str(b), str(s), status)
-        if b > 0 or (strict and s > 0):
-            detailed_findings.append(report)
+            status = "OK"
+        all_reports.append({
+            "skill": report.skill_name,
+            "path": str(report.skill_path),
+            "blocking": b,
+            "suggestions": s,
+            "status": status,
+            "findings": [
+                {"rule": f.rule, "severity": f.severity, "message": f.message}
+                for f in report.findings
+            ],
+        })
 
-    c.print(table)
+    # --- Output ---
+    if as_json:
+        output = {
+            "ruleset": ruleset_name,
+            "strict": strict,
+            "fix": fix,
+            "summary": {
+                "total": len(all_reports),
+                "clean": clean_skills,
+                "suggestions": suggest_skills,
+                "blocking": blocking_skills,
+                "auto_fixed": total_fixed,
+            },
+            "results": all_reports,
+            "auto_fixes": auto_fixes,
+        }
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    else:
+        table = Table(title=f"Skill Validation — ruleset: {ruleset_name}")
+        table.add_column("Skill", style="bold cyan")
+        table.add_column("Blocking", justify="right", style="red")
+        table.add_column("Suggest", justify="right", style="yellow")
+        table.add_column("Status", style="dim")
 
-    for report in detailed_findings:
-        c.print(f"\n[bold]{report.skill_name}[/]  [dim]{report.skill_path}[/]")
-        for f in report.findings:
-            colour = "red" if f.severity == SEVERITY_BLOCKING else "yellow"
-            c.print(f"  [{colour}]{f.severity}[/]  [bold]{f.rule}[/]  {f.message}")
+        detailed_findings: List = []
+        for r in all_reports:
+            b, s, st = r["blocking"], r["suggestions"], r["status"]
+            st_style = {"BLOCKING": "[red]BLOCKING[/]", "SUGGEST": "[yellow]SUGGEST[/]", "OK": "[green]OK[/]"}.get(st, st)
+            table.add_row(r["skill"], str(b), str(s), st_style)
+            if b > 0 or (strict and s > 0):
+                detailed_findings.append(r)
 
-    c.print(
-        f"\n[dim]Summary: {clean_skills} OK, {suggest_skills} with suggestions, "
-        f"{blocking_skills} with blocking findings.[/]\n"
-    )
+        c.print(table)
 
+        for r in detailed_findings:
+            c.print(f"\n[bold]{r['skill']}[/]  [dim]{r['path']}[/]")
+            for f in r["findings"]:
+                colour = "red" if f["severity"] == SEVERITY_BLOCKING else "yellow"
+                c.print(f"  [{colour}]{f['severity']}[/]  [bold]{f['rule']}[/]  {f['message']}")
+
+        c.print(
+            f"\n[dim]Summary: {clean_skills} OK, {suggest_skills} with suggestions, "
+            f"{blocking_skills} with blocking findings."
+        )
+        if total_fixed > 0:
+            c.print(f"[green]Auto-fixes applied to {total_fixed} skill(s) — "
+                    f"backups saved as .pre-lint.SKILL.md[/]")
+        c.print()
+
+    if total_fixed > 0:
+        return 2
     return blocking_skills + (suggest_skills if strict else 0)
 
 
@@ -1696,6 +1787,8 @@ def skills_command(args) -> None:
             target=getattr(args, "target", None),
             ruleset=getattr(args, "ruleset", "hermes"),
             strict=getattr(args, "strict", False),
+            fix=getattr(args, "fix", False),
+            as_json=getattr(args, "json", False),
         )
     elif action == "uninstall":
         do_uninstall(args.name)
@@ -1885,6 +1978,8 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         target = None
         ruleset = "hermes"
         strict = "--strict" in args
+        fix = "--fix" in args
+        as_json = "--json" in args
         for a in args:
             if not a.startswith("--"):
                 target = a
@@ -1893,7 +1988,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
             idx = args.index("--ruleset")
             if idx + 1 < len(args):
                 ruleset = args[idx + 1]
-        do_validate(target=target, ruleset=ruleset, strict=strict)
+        do_validate(target=target, ruleset=ruleset, strict=strict, fix=fix, as_json=as_json)
 
     elif action == "uninstall":
         if not args:

@@ -21,6 +21,7 @@ CLI / tooling can render as needed.
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -178,6 +179,51 @@ def _find_body_dead_refs(body: str, valid_names: Set[str]) -> List[str]:
         if ref not in valid_names:
             dead.append(ref)
     return dead
+
+
+def _find_body_dead_ref_lines(body: str, valid_names: Set[str]) -> Dict[str, List[int]]:
+    """Dict of dead_ref -> [line_numbers] for backtick refs that don't resolve to real skill names."""
+    dead = _find_body_dead_refs(body, valid_names)
+    result: Dict[str, List[int]] = {}
+    lines = body.splitlines()
+    for ref in (deduped := list(dict.fromkeys(dead))):
+        positions: list[int] = []
+        for i, line in enumerate(lines, 1):
+            if f"`{ref}`" in line:
+                positions.append(i)
+        if positions:
+            result[ref] = positions
+    return result
+
+
+def auto_fix_related_skills(skill_path: Path, broken_refs: List[str]) -> bool:
+    """Remove broken related_skills entries from SKILL.md frontmatter.
+
+    Creates a ``.pre-lint.SKILL.md`` backup before modifying. Returns True if
+    any changes were made.
+
+    This is the only write-to-disk operation in the module. It is intended to
+    be called explicitly (e.g. by ``hermes skills validate --fix``) and is NOT
+    part of the read-only :func:`validate_skill` pipeline.
+    """
+    content = skill_path.read_text(encoding="utf-8")
+    backup_path = skill_path.with_name(".pre-lint.SKILL.md")
+
+    if not backup_path.exists():
+        shutil.copy2(str(skill_path), str(backup_path))
+
+    orig_content = content
+    for ref in broken_refs:
+        lines = content.splitlines(keepends=True)
+        # Match `- ref`, `- 'ref'`, `- "ref"` at any indent level under related_skills
+        new_lines = [l for l in lines
+                     if not re.match(r"\s*-\s*" + re.escape(ref) + r"\s*$", l.strip())]
+        content = "".join(new_lines)
+
+    if content != orig_content:
+        skill_path.write_text(content, encoding="utf-8")
+        return True
+    return False
 
 
 def build_skill_name_index(skills_root: Path) -> Set[str]:
@@ -448,18 +494,13 @@ def validate_skill(
 
     # body.dead_references — backtick-wrapped skill names that don't resolve
     if valid_names is not None:
-        body_dead = _find_body_dead_refs(body, valid_names)
-        # Deduplicate for cleaner output
-        seen: Set[str] = set()
-        unique_dead: List[str] = []
-        for r in body_dead:
-            if r not in seen:
-                seen.add(r)
-                unique_dead.append(r)
-        if unique_dead:
+        dead_lines = _find_body_dead_ref_lines(body, valid_names)
+        if dead_lines:
+            parts = [f"`{ref}` at line~{','.join(map(str,lines))}"
+                     for ref, lines in dead_lines.items()]
             add(
                 "body.dead_references",
-                f"Body text references skill names not found in any SKILL.md: {unique_dead}",
+                f"Body text references skill names not found in any SKILL.md: {'; '.join(parts)}",
             )
 
     # section.*

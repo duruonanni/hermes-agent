@@ -11,6 +11,7 @@ from tools.skills_validator import (
     Finding,
     ValidationReport,
     _BODY_DEAD_REF_SKIP,
+    auto_fix_related_skills,
     build_skill_name_index,
     find_skills,
     load_ruleset,
