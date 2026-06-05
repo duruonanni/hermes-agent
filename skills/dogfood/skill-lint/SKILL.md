@@ -36,7 +36,10 @@ python3 ~/.hermes/skills/dogfood/skill-lint/scripts/lint.py
 python3 ~/.hermes/skills/dogfood/skill-lint/scripts/lint.py > /tmp/lint-output.json
 
 # Read result
-cat /tmp/lint-output.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"{d['summary']['total_skills']} skills, {d['summary']['errors']} errors, {d['summary']['warnings']} warnings, {d['summary']['auto_fixed']} auto-fixed\")"
+cat /tmp/lint-output.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\\\"{d['summary']['total_skills']} skills, {d['summary']['errors']} errors, {d['summary']['warnings']} warnings, {d['summary']['auto_fixed']} auto-fixed\\\")"
+
+# Or use the new native CLI directly (requires --fix for auto-fix)
+hermes skills validate [--fix] [--json] [--strict]
 ```
 
 ## Exit Codes
@@ -44,6 +47,18 @@ cat /tmp/lint-output.json | python3 -c "import sys,json; d=json.load(sys.stdin);
 - `0` — Clean (no issues)
 - `1` — Issues found (errors or warnings)
 - `2` — Auto-fixes applied
+
+## Architecture
+
+The `scripts/lint.py` is now a thin wrapper that delegates to
+`hermes skills validate --fix --json`. The original 388-line standalone
+implementation was migrated into the core Hermes codebase:
+
+- `tools/skills_validator.py` — Core validation logic + `auto_fix_related_skills()`
+- `hermes_cli/skills_hub.py::do_validate()` — CLI dispatch with `--fix` and `--json`
+- `hermes_cli/main.py` — argparse wiring
+
+Backwards-compatible: same JSON schema, same exit codes, same CLI interface.
 
 ## Related
 
