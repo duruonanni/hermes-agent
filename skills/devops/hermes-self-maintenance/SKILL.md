@@ -32,6 +32,11 @@ triggers:
 - venv
 - 磁盘空间
 - 释放空间
+- skill 创建或修改
+- skill 文件操作
+- 自定义 skill
+- 会话结束合规检查
+- local/custom-skills
 ---
 
 # Hermes Self-Maintenance
