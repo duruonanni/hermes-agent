@@ -110,6 +110,79 @@ def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
     }
 
 
+# ===== GATE: Target Classification Heuristics =====
+# Simple keyword patterns to detect misplaced entries.
+# "memory" entries are environment facts; "user" entries are personal details.
+_USER_KEYWORDS = [
+    # English
+    "prefer", "likes ", "likes.", "dislikes", "favorite", "favourite",
+    "works at", "works as", "works in", "works for",
+    "name is", "called ", "email", "phone", "lives in", "lives at",
+    "works with", "studies", "studied", "born", "birthday",
+    "my name", "my email", "my phone", "i work", "i live",
+    # Chinese
+    "来自", "叫", "名字", "工作", "住在", "喜欢", "不喜欢",
+    "我的", "我是", "我做", "我在",
+]
+
+_ENVIRONMENT_KEYWORDS = [
+    # English
+    "installed", "install ", "config", "directory", "path", "env ",
+    "environment", "project uses", "built with", "running on",
+    "version", "operating system", "os ", "tool", "framework",
+    "package", "repository", "git ", "branch", "commit",
+    "docker", "container", "server", "port ", "endpoint",
+    "api ", "url ", "token", "key ", "password",
+    # Chinese
+    "安装", "配置", "目录", "路径", "环境", "版本",
+    "工具", "框架", "包", "仓库", "分支",
+]
+
+GATE_SIMILARITY_THRESHOLD = 0.6
+"""Minimum similarity ratio (SequenceMatcher) to flag as near-duplicate."""
+
+
+def _classify_target_mismatch(target: str, content: str) -> Optional[str]:
+    """Check if content looks misplaced for the target store.
+
+    Returns the *suggested* target ('memory' or 'user') if a mismatch
+    is detected, or None if the content seems appropriate for the given
+    target.  Uses simple keyword heuristics — false positives are possible
+    but the gate only warns, it does not block.
+    """
+    content_lower = content.lower()
+    if target == "memory":
+        # Content about the user placed in environment-facts store
+        if any(kw in content_lower for kw in _USER_KEYWORDS):
+            return "user"
+    elif target == "user":
+        # Content about environment/tools placed in user-profile store
+        if any(kw in content_lower for kw in _ENVIRONMENT_KEYWORDS):
+            return "memory"
+    return None
+
+
+def _find_similar_entry(
+    entries: List[str], content: str,
+    threshold: float = GATE_SIMILARITY_THRESHOLD,
+) -> Optional[tuple[int, str, float]]:
+    """Find an existing entry whose text is similar to ``content``.
+
+    Returns ``(index, text, similarity_ratio)`` for the best match above
+    threshold, or None.  Exact matches (ratio == 1.0) are excluded — they
+    are handled by the exact-duplicate check in ``add()``.
+    """
+    from difflib import SequenceMatcher
+
+    best: Optional[tuple[int, str, float]] = None
+    for i, entry in enumerate(entries):
+        ratio = SequenceMatcher(None, content.lower(), entry.lower()).ratio()
+        if threshold <= ratio < 1.0:
+            if best is None or ratio > best[2]:
+                best = (i, entry, ratio)
+    return best
+
+
 class MemoryStore:
     """
     Bounded curated memory with file persistence. One instance per AIAgent.
@@ -305,6 +378,19 @@ class MemoryStore:
         if scan_error:
             return {"success": False, "error": scan_error}
 
+        # ===== GATE 1: Target Classification Check =====
+        # Heuristic: detect if content looks misplaced for the selected target.
+        # Returns the suggested target or None.  Only warns, does NOT block —
+        # the agent may have a good reason for the choice (e.g. hybrid entries).
+        gate_classification = _classify_target_mismatch(target, content)
+        if gate_classification:
+            logger.info(
+                "GATE[classification] target=%s -> suggest=%s content=%.80s",
+                target, gate_classification, content,
+            )
+
+        similar_result: Optional[tuple[int, str, float]] = None
+
         with self._file_lock(self._path_for(target)):
             # Re-read from disk under lock to pick up writes from other sessions.
             # If external drift was detected, the file was backed up to .bak.<ts>
@@ -319,7 +405,19 @@ class MemoryStore:
 
             # Reject exact duplicates
             if content in entries:
+                logger.info("GATE[dedup] exact duplicate rejected for %s: %.80s", target, content)
                 return self._success_response(target, "Entry already exists (no duplicate added).")
+
+            # ===== GATE 2: Fuzzy Dedup Check =====
+            # Compare against existing entries using string similarity.
+            # If >60% match, warn the agent but still allow the write.
+            similar_result = _find_similar_entry(entries, content)
+            if similar_result:
+                idx, existing, score = similar_result
+                logger.info(
+                    "GATE[fuzzy-dedup] %.0f%% similar to entry[%d] in %s: %.80s",
+                    score * 100, idx, target, content,
+                )
 
             # Calculate what the new total would be
             new_entries = entries + [content]
@@ -342,7 +440,35 @@ class MemoryStore:
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+        # ===== Build response with Gate warnings =====
+        resp = self._success_response(target, "Entry added.")
+
+        if gate_classification:
+            resp["gate"] = "classification"
+            resp["gate_detail"] = (
+                f"This content appears to describe user-related information, "
+                f"but was saved to '{target}'. "
+                f"Consider using target='{gate_classification}' instead."
+            )
+
+        if similar_result:
+            idx, existing, score = similar_result
+            resp["gate"] = "dedup"
+            resp["gate_detail"] = (
+                f"A similar entry ({score:.0f}% match) already exists. "
+                f"Consider using replace() to update it instead of adding a new entry."
+            )
+            resp["similar_entry"] = existing[:200] + ("..." if len(existing) > 200 else "")
+            resp["similarity"] = round(score, 2)
+
+        # ===== GATE 3: Audit Log =====
+        logger.info(
+            "GATE[audit] added entry to %s. len=%d chars=%d/%d entries=%d",
+            target, len(content), self._char_count(target), self._char_limit(target),
+            len(self._entries_for(target)),
+        )
+
+        return resp
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
@@ -654,7 +780,12 @@ MEMORY_SCHEMA = {
     "description": (
         "Save durable information to persistent memory that survives across sessions. "
         "Memory is injected into future turns, so keep it compact and focused on facts "
-        "that will still matter later.\n\n"
+        "that will still matter later.\\n\\n"
+        "⚠️ MEMORY GATE ACTIVE: Target classification and fuzzy dedup checks run on every add().\\n"
+        "  - Target mismatch: content that sounds like user info → use target='user'; "
+        "environment facts → use target='memory'.\\n"
+        "  - Near-duplicate: >60% similar to existing → use replace() instead.\\n"
+        "Check the response for 'gate' and 'gate_detail' fields.\\n\\n"
         "WHEN TO SAVE (do this proactively, don't wait to be asked):\n"
         "- User corrects you or says 'remember this' / 'don't do that again'\n"
         "- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n"
