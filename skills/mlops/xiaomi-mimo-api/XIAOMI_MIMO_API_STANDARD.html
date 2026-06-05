@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Xiaomi Mimo Api Skill — Standard</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --paper: #ffffff;
+      --text: #1f2933;
+      --muted: #5c6672;
+      --line: #d9dee5;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --ink: #121820;
+      --code: #f1f3f5;
+      --ok: #166534;
+      --warn: #9a3412;
+      --shadow: 0 16px 45px rgba(18, 24, 32, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Arial, "Microsoft YaHei", sans-serif;
+      line-height: 1.62;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 32px 24px 56px; }
+    .topbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+    .language-switch {
+      display: inline-flex; gap: 4px; padding: 4px;
+      background: var(--paper); border: 1px solid var(--line);
+      border-radius: 8px; box-shadow: 0 8px 22px rgba(18,24,32,0.06);
+    }
+    .language-switch button {
+      min-width: 76px; border: 0; border-radius: 6px;
+      padding: 8px 12px; background: transparent; color: var(--muted);
+      font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+    }
+    .language-switch button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+    .hero {
+      display: grid; grid-template-columns: minmax(0,1.6fr) minmax(280px,0.8fr);
+      gap: 28px; align-items: end; padding: 24px 0 26px;
+      border-bottom: 1px solid var(--line);
+    }
+    .eyebrow {
+      margin: 0 0 10px; color: var(--accent); font-size: 13px;
+      font-weight: 800; text-transform: uppercase; letter-spacing: 0;
+    }
+    h1 {
+      margin: 0; color: var(--ink);
+      font-size: clamp(34px, 5vw, 58px); line-height: 1.05; letter-spacing: 0;
+    }
+    .lead { max-width: 780px; margin: 18px 0 0; color: var(--muted); font-size: 18px; }
+    .meta, nav, section {
+      background: var(--paper); border: 1px solid var(--line);
+      border-radius: 8px; box-shadow: var(--shadow);
+    }
+    .meta { padding: 18px; }
+    .meta h2 { margin-top: 0; font-size: 16px; }
+    .meta dl {
+      display: grid; grid-template-columns: 92px 1fr;
+      gap: 8px 12px; margin: 0; font-size: 14px;
+    }
+    .meta dt { color: var(--muted); }
+    .meta dd { margin: 0; color: var(--ink); font-weight: 700; }
+    .layout {
+      display: grid; grid-template-columns: 260px minmax(0,1fr);
+      gap: 28px; margin-top: 28px;
+    }
+    nav { position: sticky; top: 18px; align-self: start; padding: 16px; }
+    nav h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0; }
+    nav a { display: block; padding: 7px 0; color: var(--text); font-size: 14px; }
+    main { min-width: 0; }
+    section { padding: 28px; margin-bottom: 20px; }
+    h2 { margin: 0 0 14px; color: var(--ink); font-size: 25px; line-height: 1.25; }
+    h3 { margin: 24px 0 10px; color: var(--ink); font-size: 17px; }
+    p { margin: 0 0 14px; }
+    ul, ol { margin: 10px 0 0; padding-left: 22px; }
+    li { margin: 6px 0; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; }
+    .callout {
+      border-left: 4px solid var(--accent); background: var(--accent-soft);
+      padding: 14px 16px; margin: 18px 0; border-radius: 0 8px 8px 0;
+    }
+    .check { border-left-color: var(--ok); background: #f0fdf4; }
+    .warn { border-left-color: var(--warn); background: #fff7ed; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: #f8fafc; color: var(--ink); }
+    code {
+      background: var(--code); border-radius: 4px; padding: 2px 5px;
+      font-family: Consolas, "Courier New", monospace; font-size: 0.92em;
+    }
+    pre {
+      overflow: auto; background: #111827; color: #f9fafb;
+      border-radius: 8px; padding: 16px; font-size: 13px; line-height: 1.5;
+    }
+    pre code { background: transparent; padding: 0; color: inherit; }
+    .footer { margin-top: 26px; color: var(--muted); font-size: 13px; text-align: center; }
+    @media (max-width: 900px) {
+      .hero, .layout { grid-template-columns: 1fr; }
+      nav { position: static; }
+      .grid { grid-template-columns: 1fr; }
+      .topbar { justify-content: flex-start; }
+    }
+    @media print {
+      body { background: #fff; }
+      .shell { max-width: none; padding: 0; }
+      .topbar, nav { display: none; }
+      .hero, .layout { display: block; }
+      section, .meta { box-shadow: none; break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar" aria-label="Language selector">
+      <div class="language-switch">
+        <button id="lang-en" type="button" aria-pressed="true">EN</button>
+        <button id="lang-zh" type="button" aria-pressed="false">中文</button>
+      </div>
+    </div>
+
+    <header class="hero">
+      <div>
+        <p class="eyebrow" data-en="Agent Skill · mlops" data-zh="Agent Skill · MLOps"></p>
+        <h1 data-en="Xiaomi Mimo Api Skill" data-zh="Xiaomi Mimo Api Skill"></h1>
+        <p class="lead" data-en=">" data-zh=">"></p>
+      </div>
+      <aside class="meta" aria-label="Document metadata">
+        <h2 data-en="Skill Profile" data-zh="Skill 定位"></h2>
+        <dl>
+          <dt data-en="Name" data-zh="名称"></dt>
+          <dd><code>xiaomi-mimo-api</code></dd>
+          <dt data-en="Version" data-zh="版本"></dt>
+          <dd>1.1.0</dd>
+          <dt data-en="Trigger" data-zh="触发"></dt>
+          <dd data-en="Manual (context detection)" data-zh="用户询问MiMo模型/定价/API时加载"></dd>
+          <dt data-en="Category" data-zh="分类"></dt>
+          <dd data-en="mlops" data-zh="MLOps"></dd>
+          <dt data-en="Tags" data-zh="标签"></dt>
+          <dd><code>mimo</code></dd>
+          <dt data-en="Tags" data-zh="标签"></dt>
+          <dd><code>xiaomi</code></dd>
+          <dt data-en="Tags" data-zh="标签"></dt>
+          <dd><code>API</code></dd>
+          <dt data-en="Tags" data-zh="标签"></dt>
+          <dd><code>llm</code></dd>
+          
+        </dl>
+      </aside>
+    </header>
+
+    <div class="layout">
+      <nav aria-label="Table of contents">
+        <h2 data-en="Contents" data-zh="目录"></h2>
+        <a href="#overview" data-en="1. Overview" data-zh="1. 概述"></a>
+        <a href="#usage" data-en="2. Usage" data-zh="2. 使用方法"></a>
+        <a href="#trigger" data-en="3. Trigger Conditions" data-zh="3. 触发条件"></a>
+        <a href="#dependencies" data-en="4. Dependencies" data-zh="4. 依赖项"></a>
+        <a href="#pitfalls" data-en="5. Pitfalls" data-zh="5. 注意事项"></a>
+        <a href="#related" data-en="6. Related Skills" data-zh="6. 关联 Skill"></a>
+        <a href="#files" data-en="7. Files" data-zh="7. 文件清单"></a>
+      </nav>
+
+      <main>
+        <section id="overview">
+          <h2 data-en="1. Overview" data-zh="1. 概述"></h2>
+          <p data-en="This skill provides >." data-zh="本Skill提供>相关功能。"></p>
+          
+        </section>
+
+        <section id="usage">
+          <h2 data-en="2. Usage" data-zh="2. 使用方法"></h2>
+          <h3 data-en="How to invoke" data-zh="调用方式"></h3>
+          <p data-en="Loaded via Hermes Agent. Trigger mode: manual." data-zh="通过 Hermes Agent 加载。触发模式：manual。"></p>
+          <h3 data-en="Typical workflow" data-zh="典型流程"></h3>
+          <ol>
+                        <li data-en="Quick Reference" data-zh="Quick Reference"></li>
+            <li data-en="Pricing (Chinese Domestic, RMB)" data-zh="Pricing (Chinese Domestic, RMB)"></li>
+            <li data-en="Hermes Integration" data-zh="Hermes Integration"></li>
+            <li data-en="Anthropic API Endpoint" data-zh="Anthropic API Endpoint"></li>
+            <li data-en="Claude Code Integration (Anthropic Format)" data-zh="Claude Code Integration (Anthropic Format)"></li>
+            <li data-en="Setup Script" data-zh="Setup Script"></li>
+            <li data-en="Codex CLI Compatibility: ❌ NOT WORKING with MiMo" data-zh="Codex CLI Compatibility: ❌ NOT WORKING with MiMo"></li>
+            <li data-en="Switching Between MiMo and DeepSeek" data-zh="Switching Between MiMo and DeepSeek"></li>
+          </ol>
+          <h3 data-en="Examples" data-zh="使用示例"></h3>
+          <pre><code>hermes setup</code></pre>
+        </section>
+
+        <section id="trigger">
+          <h2 data-en="3. Trigger Conditions" data-zh="3. 触发条件"></h2>
+          <p data-en="Loaded when user asks about MiMo models/pricing/API" data-zh="用户询问MiMo模型/定价/API时加载"></p>
+          <table>
+            <thead>
+              <tr><th data-en="Mode" data-zh="模式"></th><th data-en="Description" data-zh="说明"></th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>manual</code></td>
+                <td data-en="Loaded when user asks about MiMo models/pricing/API" data-zh="用户询问MiMo模型/定价/API时加载"></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="dependencies">
+          <h2 data-en="4. Dependencies" data-zh="4. 依赖项"></h2>
+          <table>
+            <thead>
+              <tr><th data-en="Type" data-zh="类型"></th><th data-en="Item" data-zh="项目"></th></tr>
+            </thead>
+            <tbody>
+              <tr><td data-en="Runtime" data-zh="运行时"></td><td><code>Hermes Agent</code></td></tr>
+            </tbody>
+          </table>
+          <div class="callout check">
+            <strong data-en="No external dependencies" data-zh="无外部依赖"></strong>
+            <p data-en="This skill uses only Hermes built-in tools and stdlib commands. No additional packages required." data-zh="本 Skill 仅使用 Hermes 内置工具和标准命令，无需额外安装。"></p>
+          </div>
+        </section>
+
+        <section id="pitfalls">
+          <h2 data-en="5. Pitfalls" data-zh="5. 注意事项"></h2>
+          <ul>
+            
+          </ul>
+        </section>
+
+        <section id="related">
+          <h2 data-en="6. Related Skills" data-zh="6. 关联 Skill"></h2>
+          <table>
+            <thead>
+              <tr><th data-en="Skill" data-zh="Skill"></th><th data-en="Role" data-zh="角色"></th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>deepseek-api</code></td><td data-en="Related skill" data-zh="关联Skill"></td></tr>
+            <tr><td><code>hermes-agent</code></td><td data-en="Related skill" data-zh="关联Skill"></td></tr>
+            <tr><td><code>claude-code</code></td><td data-en="Related skill" data-zh="关联Skill"></td></tr>
+            
+            </tbody>
+          </table>
+        </section>
+
+        <section id="files">
+          <h2 data-en="7. Files" data-zh="7. 文件清单"></h2>
+          <pre><code>xiaomi-mimo-api/
+.pre-lint.SKILL.md
+SKILL.md
+  coding-tools-setup.md
+  daily-monitoring.md
+  setup_mimo_env.sh</code></pre>
+        </section>
+
+        <p class="footer" data-en="xiaomi-mimo-api skill v1.1.0 · Agent Skills standard (agentskills.io)" data-zh="xiaomi-mimo-api skill v1.1.0 · Agent Skills 标准 (agentskills.io)"></p>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const langBtn = { en: document.getElementById("lang-en"), zh: document.getElementById("lang-zh") };
+    function setLang(lang) {
+      const l = lang === "zh" ? "zh" : "en";
+      document.documentElement.lang = l === "zh" ? "zh-CN" : "en";
+      document.querySelectorAll("[data-en][data-zh]").forEach(n => { n.textContent = n.dataset[l]; });
+      langBtn.en.setAttribute("aria-pressed", String(l === "en"));
+      langBtn.zh.setAttribute("aria-pressed", String(l === "zh"));
+    }
+    langBtn.en.addEventListener("click", () => setLang("en"));
+    langBtn.zh.addEventListener("click", () => setLang("zh"));
+    setLang("en");
+  </script>
+</body>
+</html>
