@@ -111,15 +111,18 @@ AHEAD=$("${GIT[@]}" rev-list --count "$REMOTE_REF..HEAD" 2>/dev/null || echo "0"
 
 echo "Behind upstream: $BEHIND  Ahead of upstream: $AHEAD"
 
+# ── 无落后 → 已是最新 ──
 if [ "$BEHIND" = "0" ]; then
     echo "Already up to date."
     exit 0
 fi
 
-# ── 如果 local main 比 upstream 还多 commit，拒绝自动合并 ──
+# ── 双向分歧（本地也有上游没有的 commit）→ 拒绝自动合并 ──
+#    注意：只有 AHEAD > 0 且 BEHIND > 0 才是真正分叉。
+#    AHEAD > 0 但 BEHIND == 0 的情况已在上面 exit 0 处理。
 if [ "$AHEAD" != "0" ]; then
-    echo "ERROR: local main has $AHEAD commit(s) not in upstream."
-    echo "  This means main has diverged from upstream/main."
+    echo "ERROR: main has diverged from upstream/main."
+    echo "  Local: $AHEAD commit(s) ahead, $BEHIND commit(s) behind upstream."
     echo "  Manual resolution required:"
     echo "    git rebase upstream/main  # or git merge upstream/main"
     exit 2
