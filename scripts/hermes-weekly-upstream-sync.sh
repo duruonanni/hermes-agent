@@ -7,7 +7,7 @@ set -Eeuo pipefail
 REPO_DIR="$HOME/src/hermes-agent"
 BRANCH="main"
 UPSTREAM="upstream"
-REMOTE_REF="$UPSTREAM/$BRANCH"
+REMOTE_REF=""    # set after fetch, see tag discovery below
 LOCK_FILE="/tmp/hermes-weekly-upstream-sync.lock"
 LOG_DIR="$HOME/.hermes/logs"
 LOG_FILE="$LOG_DIR/hermes-weekly-upstream-sync.log"
@@ -87,7 +87,7 @@ fetch_with_retry() {
     local attempt
     for attempt in 1 2 3; do
         echo "Fetch upstream (attempt $attempt/3)..."
-        if "${GIT[@]}" fetch --prune "$UPSTREAM"; then
+        if "${GIT[@]}" fetch --prune --tags "$UPSTREAM"; then
             echo "Fetch succeeded."
             return 0
         fi
@@ -105,11 +105,22 @@ if ! fetch_with_retry; then
     exit 1
 fi
 
+# ── 查找最新 Release tag（替代 upstream/main）──
+#    只跟踪正式 Release 标签，不跟踪开发分支
+LATEST_TAG=$("${GIT[@]}" tag --list 'v20*' --sort=-version:refname 2>/dev/null | head -1 || echo "")
+if [ -n "$LATEST_TAG" ]; then
+    REMOTE_REF="$LATEST_TAG"
+    echo "Release target tag: $REMOTE_REF"
+else
+    REMOTE_REF="${UPSTREAM}/${BRANCH}"
+    echo "No release tags found, falling back to $REMOTE_REF (development branch)"
+fi
+
 # ── 检查差异 ──
 BEHIND=$("${GIT[@]}" rev-list --count "HEAD..$REMOTE_REF" 2>/dev/null || echo "0")
 AHEAD=$("${GIT[@]}" rev-list --count "$REMOTE_REF..HEAD" 2>/dev/null || echo "0")
 
-echo "Behind upstream: $BEHIND  Ahead of upstream: $AHEAD"
+echo "Behind release target: $BEHIND  Ahead of release target: $AHEAD"
 
 # ── 无落后 → 已是最新 ──
 if [ "$BEHIND" = "0" ]; then
@@ -208,7 +219,7 @@ if [ "$AHEAD" != "0" ]; then
 fi
 
 # ── 列出新 commits ──
-echo "New commits from upstream:"
+echo "New commits since last sync:"
 "${GIT[@]}" log --oneline --no-decorate "HEAD..$REMOTE_REF"
 
 # ── 快进合并 ──
