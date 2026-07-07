@@ -12,6 +12,7 @@ Usage:
 import sqlite3
 import json
 import os
+import re
 import sys
 import argparse
 from datetime import datetime, date, timedelta, time as dt_time
@@ -27,8 +28,7 @@ USERS = {
 }
 
 # Skills loaded via skill_view() during sessions
-# We track skill_view(name) calls from messages
-SKILL_VIEW_PATTERN = 'skill_view'
+# Multi-pattern detection: tool results, assistant calls, system invokes, cron associations
 
 
 def get_report_window(reference_date: date = None) -> tuple[datetime, datetime]:
@@ -90,6 +90,7 @@ def query_data(from_ts: float, to_ts: float) -> dict[str, Any]:
         uid = s['user_id'] or ''
         uname = USERS.get(uid, uid)
         s['user_name'] = uname
+        chat_type = s['chat_type'] or 'dm'
 
         session_ids.append(s['id'])
         result['sessions'].append({
@@ -100,7 +101,7 @@ def query_data(from_ts: float, to_ts: float) -> dict[str, Any]:
             'started_at': s['started_at'],
             'ended_at': s['ended_at'],
             'message_count': s['message_count'],
-            'chat_type': s['chat_type'] or 'unknown',
+            'chat_type': chat_type,
             'chat_id': s['chat_id'],
             'input_tokens': s['input_tokens'] or 0,
             'output_tokens': s['output_tokens'] or 0,
@@ -121,9 +122,9 @@ def query_data(from_ts: float, to_ts: float) -> dict[str, Any]:
         stats['input_tokens'] += s['input_tokens'] or 0
         stats['output_tokens'] += s['output_tokens'] or 0
         stats['tool_calls'] += s['tool_call_count'] or 0
-        if s['chat_type'] == 'dm':
+        if chat_type == 'dm':
             stats['dm_sessions'] += 1
-        elif s['chat_type'] == 'group':
+        elif chat_type == 'group':
             stats['group_sessions'] += 1
         if s['title'] and s['title'] != 'untitled':
             stats['titles'].append(s['title'])
@@ -144,16 +145,85 @@ def query_data(from_ts: float, to_ts: float) -> dict[str, Any]:
 
         all_messages = [dict(m) for m in c.fetchall()]
 
-        # Check for skill_view calls in assistant messages
+        # ═══ Multi-pattern skill detection ═══
+        # Known tool/function names to exclude (not real skills)
+        TOOL_NAMES = {
+            'terminal', 'web_search', 'read_file', 'session_search', 'cronjob',
+            'search_files', 'process', 'skill_view', 'todo', 'browser_navigate',
+            'web_extract', 'write_file', 'skill_manage', 'execute_code',
+            'delegate_task', 'memory', 'browser_vision', 'browser_console',
+            'feishu_doc_read', 'patch', 'vision_analyze', 'image_generate',
+            'text_to_speech', 'browser_click', 'browser_type', 'browser_snapshot',
+            'browser_press', 'browser_scroll', 'browser_get_images', 'browser_back',
+            'clarify', 'feishu_drive_add_comment', 'feishu_drive_list_comments',
+            'feishu_drive_list_comment_replies', 'feishu_drive_reply_comment',
+            'mcp_officecli_officecli', 'cron', 'task',
+        }
+
+        # Pattern 1: skill_view() TOOL results — JSON with "name" + "description"
+        # (filters out cronjob results which have "schedule" instead of "description")
+        c.execute(f"""
+            SELECT content FROM messages
+            WHERE session_id IN ({placeholders})
+              AND role = 'tool'
+              AND content LIKE '%"name":%'
+              AND content LIKE '%"description":%'
+        """, session_ids)
+        for (content,) in c.fetchall():
+            for m in re.finditer(r'"name"\s*:\s*"([^"]+)"', content):
+                skill_name = m.group(1)
+                # Validate skill-name pattern (lowercase with hyphens/underscores)
+                if re.match(r'^[a-z][a-z0-9_-]+(\.[a-z][a-z0-9_-]+)*$', skill_name):
+                    if skill_name not in TOOL_NAMES:
+                        skill_mentions[skill_name] = skill_mentions.get(skill_name, 0) + 1
+
+        # Pattern 2: cronjob() TOOL results — extract from "skill" and "skills" fields
+        c.execute(f"""
+            SELECT content FROM messages
+            WHERE session_id IN ({placeholders})
+              AND role = 'tool'
+              AND content LIKE '%"schedule":%'
+              AND content LIKE '%"skill"%'
+        """, session_ids)
+        for (content,) in c.fetchall():
+            # Extract single "skill" field: "skill": "skill-name"
+            for m in re.finditer(r'"skill"\s*:\s*"([^"]+)"', content):
+                sn = m.group(1)
+                if sn and sn != 'null' and re.match(r'^[a-z][a-z0-9_-]+(\.[a-z][a-z0-9_-]+)*$', sn):
+                    if sn not in TOOL_NAMES:
+                        skill_mentions[sn] = skill_mentions.get(sn, 0) + 1
+            # Extract list "skills" field: "skills": ["name1", "name2"]
+            for m in re.finditer(r'"skills"\s*:\s*\[([^\]]*)\]', content):
+                for sn_match in re.finditer(r'"([^"]+)"', m.group(1)):
+                    sn = sn_match.group(1)
+                    if sn and sn != 'null' and re.match(r'^[a-z][a-z0-9_-]+(\.[a-z][a-z0-9_-]+)*$', sn):
+                        if sn not in TOOL_NAMES:
+                            skill_mentions[sn] = skill_mentions.get(sn, 0) + 1
+
+        # Pattern 3: skill_view('name') in assistant messages (inline calls)
         for msg in all_messages:
             if msg['role'] == 'assistant':
                 content = msg['content'] or ''
-                if SKILL_VIEW_PATTERN in content.lower():
-                    # Extract skill name from the content
-                    import re
-                    matches = re.findall(r"skill_view\('([^']+)'\)", content)
-                    for skill_name in matches:
-                        skill_mentions[skill_name] = skill_mentions.get(skill_name, 0) + 1
+                for m in re.finditer(r"skill_view\s*\(\s*'([^']+)'\s*\)", content):
+                    sn = m.group(1)
+                    if sn not in TOOL_NAMES:
+                        skill_mentions[sn] = skill_mentions.get(sn, 0) + 1
+
+        # Pattern 4: User messages with "[IMPORTANT: ... invoked ... skill]"
+        # and system-preloaded skill_view('name') calls in user messages
+        for msg in all_messages:
+            if msg['role'] == 'user':
+                content = msg['content'] or ''
+                # System invoke: 'invoked the "xxx" skill'
+                for m in re.finditer(r'invoked\s+the\s+"([^"]+)"\s+skill', content):
+                    sn = m.group(1)
+                    if sn not in TOOL_NAMES:
+                        skill_mentions[sn] = skill_mentions.get(sn, 0) + 1
+                # skill_view('name') in user messages (system pre-load)
+                for m in re.finditer(r"skill_view\s*\(\s*'([^']+)'\s*\)", content):
+                    sn = m.group(1)
+                    if sn not in TOOL_NAMES:
+                        skill_mentions[sn] = skill_mentions.get(sn, 0) + 1
 
         # Group messages by session for topic extraction (user messages only)
         session_user_msgs = {}
