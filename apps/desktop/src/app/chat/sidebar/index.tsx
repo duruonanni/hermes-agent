@@ -1982,7 +1982,6 @@ export function ChatSidebar({
             )}
 
             {!trimmedQuery &&
-              !worktreeGroupingActive &&
               messagingGroups.map(group => {
                 const visible = messagingVisible[group.sourceId] ?? NON_SESSION_INITIAL_ROWS
                 const shownSessions = group.sessions.slice(0, visible)
@@ -2039,7 +2038,7 @@ export function ChatSidebar({
                 )
               })}
 
-            {!trimmedQuery && !worktreeGroupingActive && showsAdvancedChrome && cronJobs.length > 0 && (
+            {!trimmedQuery && showsAdvancedChrome && cronJobs.length > 0 && (
               <SidebarCronJobsSection
                 jobs={cronJobs}
                 label={s.cronJobs}

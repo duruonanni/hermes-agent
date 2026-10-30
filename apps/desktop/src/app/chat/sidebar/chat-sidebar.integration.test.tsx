@@ -8,6 +8,8 @@ import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/s
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { registry } from '@/contrib/registry'
 import { $connectionsRegistry } from '@/store/connection-registry-state'
+import { setCronJobs } from '@/store/cron'
+import { setInterfaceMode } from '@/store/interface-mode'
 import { $sidebarMessagingOpenIds, setSidebarAgentsGrouped, setSidebarGrouping } from '@/store/layout'
 import { $activeGatewayProfile, $profiles, setShowAllProfiles } from '@/store/profile'
 import { $projectScope, ALL_PROJECTS } from '@/store/project-scope'
@@ -525,5 +527,53 @@ describe('ChatSidebar messaging owners', () => {
     expect(telegramGroups()).toHaveLength(0)
     expect(screen.queryByText('work-1')).toBeNull()
     expect(within(row('default-1')).queryByRole('img', { name: /^Profile:/ })).toBeNull()
+  })
+})
+
+describe('ChatSidebar global sections under project grouping', () => {
+  // #90579: switching the sidebar to project grouping used to drop the
+  // Messaging sections and the Cron jobs section, because both were gated on
+  // `!worktreeGroupingActive`. Neither belongs to a project, so both have to
+  // stay reachable while grouping.
+  const telegramThread = (id: string) =>
+    makeSessionInfo({ connection_id: 'local', id, last_active: 10, profile: 'default', source: 'telegram', title: id })
+
+  beforeEach(() => {
+    $connectionsRegistry.set({
+      version: 2,
+      primary: 'local',
+      secureTokenStorage: true,
+      connections: [{ id: 'local', label: 'This computer', kind: 'local', tokenSet: false, tokenPreview: null }]
+    } as NonNullable<typeof $connectionsRegistry.value>)
+    $profiles.set([{ name: 'default', is_default: true }] as typeof $profiles.value)
+    $sessions.set([])
+    $projectTree.set([
+      { id: '/repos/alpha', label: 'alpha', path: '/repos/alpha', repos: [], sessionCount: 0 }
+    ] as never)
+    $messagingSessions.set([telegramThread('tg-project')])
+    $messagingTruncated.set(false)
+    $sidebarMessagingOpenIds.set(['telegram'])
+    $sessionsLoading.set(false)
+    setCronJobs([{ id: 'nightly', name: 'Nightly backup' }] as never)
+    setInterfaceMode('advanced')
+    setSidebarGrouping('project')
+  })
+
+  afterEach(() => {
+    cleanup()
+    setSidebarGrouping('date')
+    setCronJobs([])
+    $messagingSessions.set([])
+    $sidebarMessagingOpenIds.set([])
+    $projectTree.set([])
+    $sessions.set([])
+  })
+
+  it('keeps the messaging sections and cron reachable while grouping by project', () => {
+    renderSidebar('/', 'chat')
+
+    expect(screen.getAllByText('Telegram').length).toBeGreaterThan(0)
+    expect(screen.getByText('tg-project')).toBeTruthy()
+    expect(screen.getByText('Cron jobs')).toBeTruthy()
   })
 })
