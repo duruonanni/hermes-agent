@@ -3423,7 +3423,11 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
         is_bot = _is_bot_sender(sender)
         is_group = getattr(message, "chat_type", "p2p") != "p2p"
         chat_id = getattr(message, "chat_id", "") or ""
-        require_mention = is_group and self._require_mention_for(chat_id)
+        # Topic threads get their own rule key (Feishu uses ``omt_`` ids), so a single
+        # noisy topic can opt out of @-mentions without opening the whole group. Only
+        # ``require_mention`` is thread-scoped: policy/allowlist stay keyed by chat_id.
+        thread_id = getattr(message, "thread_id", "") or ""
+        require_mention = is_group and self._require_mention_for(chat_id, thread_id)
         # Defensive only — Feishu doesn't echo our outbound back as inbound,
         # and open_id is always populated on both sides.
         if self_ids and sender_ids & self_ids:
@@ -3472,10 +3476,14 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
             self._warned_empty_allowlist_deny = True
             logger.warning(text)
 
-    def _require_mention_for(self, chat_id: str) -> bool:
-        rule = self._group_rules.get(chat_id) if chat_id else None
-        if rule and rule.require_mention is not None:
-            return rule.require_mention
+    def _require_mention_for(self, chat_id: str, thread_id: str = "") -> bool:
+        # Thread rule wins over the chat rule, which wins over the global setting.
+        # A rule that only carries ``policy`` leaves ``require_mention`` as None and
+        # therefore inherits — a bare ``omt_`` key never silently opens a topic.
+        for key in (thread_id, chat_id):
+            rule = self._group_rules.get(key) if key else None
+            if rule and rule.require_mention is not None:
+                return rule.require_mention
         return self._require_mention
 
     def _allow_group_message(self, sender_id: Any, chat_id: str = "", *, is_bot: bool = False) -> bool:

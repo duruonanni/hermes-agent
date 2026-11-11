@@ -2529,3 +2529,63 @@ def test_processing_failure_skips_cross_mark_when_typing_removal_fails(fake_lark
     assert tracker.created == ["Typing"]
     assert tracker.deleted == ["r_typing"]
     assert adapter._pending_processing_reactions["om_msg"] == "r_typing"
+
+
+class TestThreadScopedRequireMention(unittest.TestCase):
+    """A topic thread may opt out of @-mentions without opening its whole group."""
+
+    CHAT = "oc_b01b1021b094113973f91318ae7792be"
+    THREAD = "omt_1996b866df4f1a53"
+
+    def _adapter(self, group_rules, require_mention=True):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        config = PlatformConfig(extra={"require_mention": require_mention, "group_rules": group_rules})
+        adapter = FeishuAdapter(config)
+        adapter._bot_open_id = "ou_bot"
+        return adapter
+
+    def _message(self, thread_id=None):
+        message = SimpleNamespace(chat_type="group", chat_id=self.CHAT, content='{"text": "hi"}', mentions=[])
+        if thread_id is not None:
+            message.thread_id = thread_id
+        return message
+
+    def _admits(self, adapter, thread_id=None):
+        message = self._message(thread_id)
+        sender = SimpleNamespace(sender_type="user", sender_id=SimpleNamespace(open_id="ou_duruo", user_id=None))
+        return adapter._admit(sender, message) is None
+
+    def test_thread_rule_admits_unmentioned_message_in_that_thread(self):
+        adapter = self._adapter({self.THREAD: {"require_mention": False}})
+        self.assertTrue(self._admits(adapter, self.THREAD))
+
+    def test_same_group_outside_the_thread_still_requires_a_mention(self):
+        adapter = self._adapter({self.THREAD: {"require_mention": False}})
+        self.assertFalse(self._admits(adapter, None))
+        self.assertFalse(self._admits(adapter, "omt_somewhere_else"))
+
+    def test_thread_rule_without_require_mention_inherits_the_global_gate(self):
+        # A ``policy``-only thread key must not silently open the topic.
+        adapter = self._adapter({self.THREAD: {"policy": "open"}})
+        self.assertFalse(self._admits(adapter, self.THREAD))
+
+    def test_thread_rule_wins_over_a_chat_rule_that_keeps_mentions_on(self):
+        adapter = self._adapter({
+            self.CHAT: {"require_mention": True},
+            self.THREAD: {"require_mention": False},
+        })
+        self.assertTrue(self._admits(adapter, self.THREAD))
+        self.assertFalse(self._admits(adapter, None))
+
+    def test_chat_rule_still_applies_inside_a_thread_without_its_own_rule(self):
+        adapter = self._adapter({self.CHAT: {"require_mention": False}})
+        self.assertTrue(self._admits(adapter, "omt_other_thread"))
+
+    def test_mentioned_message_in_a_mention_required_thread_is_admitted(self):
+        adapter = self._adapter({})
+        message = self._message(self.THREAD)
+        message.mentions = [SimpleNamespace(name="Bot", id=SimpleNamespace(open_id="ou_bot", user_id=None))]
+        sender = SimpleNamespace(sender_type="user", sender_id=SimpleNamespace(open_id="ou_duruo", user_id=None))
+        self.assertIsNone(adapter._admit(sender, message))
