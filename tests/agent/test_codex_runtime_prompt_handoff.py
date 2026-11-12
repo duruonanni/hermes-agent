@@ -139,3 +139,16 @@ def test_runtime_gives_no_approval_callback_when_nobody_can_answer(monkeypatch):
         set_approval_callback(None)
     assert interactive._codex_session._approval_callback is panel
     assert single_query._codex_session._approval_callback is None
+
+
+def test_gateway_runtime_wires_human_approval_without_cli_panel(monkeypatch):
+    """Chat gateways already publish pending approvals; Codex must not silently decline them."""
+    monkeypatch.setattr(sess_mod, "CodexAppServerClient", lambda **kw: _FakeClient())
+    monkeypatch.setenv("HERMES_SESSION_PLATFORM", "feishu")
+    from tools import approval_context
+    monkeypatch.setattr(approval_context, "_is_single_query_approval_context", lambda: False)
+    monkeypatch.setattr(approval_context, "_is_cron_approval_context", lambda: False)
+    monkeypatch.setattr("tools.terminal_tool._get_approval_callback", lambda: None)
+    agent = _agent()
+    codex_runtime._ensure_codex_session(agent)
+    assert agent._codex_session._approval_callback is not None
