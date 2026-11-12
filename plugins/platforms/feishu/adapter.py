@@ -323,6 +323,9 @@ class FeishuAdapterSettings:
     group_rules: dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
+    # Topic threads inherit this when neither the topic nor its group says otherwise.
+    # ``None`` = inherit; False = every topic in every group answers without an @.
+    thread_require_mention: Optional[bool] = None
     allow_all_dm: bool = False  # resolved per-profile so multiplexed adapters honor their own .env
 
 
@@ -334,6 +337,8 @@ class FeishuGroupRule:
     allowlist: set[str] = field(default_factory=set)
     blacklist: set[str] = field(default_factory=set)
     require_mention: Optional[bool] = None  # None = inherit global
+    # Applies to every topic inside this group, including topics created later.
+    thread_require_mention: Optional[bool] = None  # None = inherit platform setting
 
 
 @dataclass
@@ -1376,6 +1381,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
                     blacklist=_id_set(rule_cfg.get("blacklist", [])),
                     # Only override when explicitly set — missing vs false must not collapse.
                     require_mention=_to_boolean(rule_cfg["require_mention"]) if "require_mention" in rule_cfg else None,
+                    thread_require_mention=_to_boolean(rule_cfg["thread_require_mention"]) if "thread_require_mention" in rule_cfg else None,
                 )
 
         # Scoped read: under multiplex a secondary profile's .env must govern its own adapter; yaml
@@ -1421,6 +1427,13 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
             default_group_policy=str(extra.get("default_group_policy", "")).strip().lower(),
             group_rules=group_rules, allow_bots=allow_bots, allow_all_dm=allow_all_dm,
             require_mention=_to_boolean(extra.get("require_mention", _get_scoped_secret("FEISHU_REQUIRE_MENTION", "true"))),
+            thread_require_mention=_to_boolean(extra["thread_require_mention"])
+            if "thread_require_mention" in extra
+            else (
+                _to_boolean(_get_scoped_secret("FEISHU_THREAD_REQUIRE_MENTION", ""))
+                if _get_scoped_secret("FEISHU_THREAD_REQUIRE_MENTION", "").strip()
+                else None
+            ),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -3477,13 +3490,25 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
             logger.warning(text)
 
     def _require_mention_for(self, chat_id: str, thread_id: str = "") -> bool:
-        # Thread rule wins over the chat rule, which wins over the global setting.
-        # A rule that only carries ``policy`` leaves ``require_mention`` as None and
-        # therefore inherits — a bare ``omt_`` key never silently opens a topic.
-        for key in (thread_id, chat_id):
-            rule = self._group_rules.get(key) if key else None
-            if rule and rule.require_mention is not None:
-                return rule.require_mention
+        """Resolve the @-mention gate: topic > group thread policy > group > global.
+
+        An ``omt_`` key targets one topic; ``thread_require_mention`` on a group (or on
+        the platform) covers every topic in that group, including topics created later.
+        Only ``require_mention`` is thread-scoped — policy/allowlist stay keyed by
+        chat_id, so a topic key never widens who may talk to the bot.
+        """
+        if thread_id:
+            topic_rule = self._group_rules.get(thread_id)
+            if topic_rule and topic_rule.require_mention is not None:
+                return topic_rule.require_mention
+            group_rule = self._group_rules.get(chat_id) if chat_id else None
+            if group_rule and group_rule.thread_require_mention is not None:
+                return group_rule.thread_require_mention
+            if self._thread_require_mention is not None:
+                return self._thread_require_mention
+        group_rule = self._group_rules.get(chat_id) if chat_id else None
+        if group_rule and group_rule.require_mention is not None:
+            return group_rule.require_mention
         return self._require_mention
 
     def _allow_group_message(self, sender_id: Any, chat_id: str = "", *, is_bot: bool = False) -> bool:

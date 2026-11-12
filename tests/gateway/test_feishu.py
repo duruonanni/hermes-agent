@@ -2589,3 +2589,57 @@ class TestThreadScopedRequireMention(unittest.TestCase):
         message.mentions = [SimpleNamespace(name="Bot", id=SimpleNamespace(open_id="ou_bot", user_id=None))]
         sender = SimpleNamespace(sender_type="user", sender_id=SimpleNamespace(open_id="ou_duruo", user_id=None))
         self.assertIsNone(adapter._admit(sender, message))
+
+
+_UNSET = object()
+
+
+class TestThreadRequireMentionPolicy(unittest.TestCase):
+    """``thread_require_mention`` opens every topic in a group, and only topics."""
+
+    CHAT = "oc_b01b1021b094113973f91318ae7792be"
+    THREAD = "omt_19909e943c0c5bb0"
+
+    def _adapter(self, group_rules=None, thread_require_mention=_UNSET):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        extra = {"require_mention": True, "group_rules": group_rules or {}}
+        if thread_require_mention is not _UNSET:
+            extra["thread_require_mention"] = thread_require_mention
+        adapter = FeishuAdapter(PlatformConfig(extra=extra))
+        adapter._bot_open_id = "ou_bot"
+        return adapter
+
+    def _admits(self, adapter, thread_id=None):
+        message = SimpleNamespace(chat_type="group", chat_id=self.CHAT, content='{"text": "hi"}', mentions=[])
+        if thread_id is not None:
+            message.thread_id = thread_id
+        sender = SimpleNamespace(sender_type="user", sender_id=SimpleNamespace(open_id="ou_duruo", user_id=None))
+        return adapter._admit(sender, message) is None
+
+    def test_group_thread_policy_opens_every_topic_including_new_ones(self):
+        adapter = self._adapter({self.CHAT: {"thread_require_mention": False}})
+        self.assertTrue(self._admits(adapter, self.THREAD))
+        self.assertTrue(self._admits(adapter, "omt_brand_new_topic"))
+
+    def test_group_thread_policy_leaves_the_main_chat_mention_gated(self):
+        adapter = self._adapter({self.CHAT: {"thread_require_mention": False}})
+        self.assertFalse(self._admits(adapter, None))
+
+    def test_platform_thread_policy_applies_without_any_group_rule(self):
+        adapter = self._adapter(thread_require_mention=False)
+        self.assertTrue(self._admits(adapter, self.THREAD))
+        self.assertFalse(self._admits(adapter, None))
+
+    def test_explicit_topic_key_still_overrides_the_group_thread_policy(self):
+        adapter = self._adapter({
+            self.CHAT: {"thread_require_mention": False},
+            "omt_locked": {"require_mention": True},
+        })
+        self.assertTrue(self._admits(adapter, self.THREAD))
+        self.assertFalse(self._admits(adapter, "omt_locked"))
+
+    def test_group_thread_policy_defaults_to_inheriting(self):
+        adapter = self._adapter({self.CHAT: {"policy": "open"}})
+        self.assertFalse(self._admits(adapter, self.THREAD))
