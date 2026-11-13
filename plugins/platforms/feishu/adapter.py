@@ -3639,27 +3639,6 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
                 key_msg_type=resolved_message_type, key_payload=key_payload,
                 media_tag={"tag": "media", "file_key": file_key, "file_name": display_name},
             )
-            # Audio may fail with 99992402 under thread_id routing: retry as a reply to the
-            # thread's last message, then fall back to a plain chat_id send.
-            if (not caption
-                    and not self._response_succeeded(message_response)
-                    and getattr(message_response, "code", None) == 99992402
-                    and resolved_message_type == "audio"
-                    and (metadata or {}).get("thread_id")):
-                payload = json.dumps(key_payload, ensure_ascii=False)
-                thread_msg_id = (metadata or {}).get("reply_to_message_id")
-                if not thread_msg_id:
-                    thread_msg_id = await self._fetch_last_message_in_thread((metadata or {}).get("thread_id"))
-                if thread_msg_id:
-                    logger.info("[Feishu] Audio: retrying via reply API in thread")
-                    message_response = await self._feishu_send_with_retry(
-                        chat_id=chat_id, msg_type="audio", payload=payload, reply_to=thread_msg_id, metadata=metadata,
-                    )
-                if not self._response_succeeded(message_response):
-                    logger.warning("[Feishu] Audio send failed in thread, retrying with chat_id")
-                    message_response = await self._feishu_send_with_retry(
-                        chat_id=chat_id, msg_type="audio", payload=payload, reply_to=None, metadata=None,
-                    )
             return self._finalize_send_result(message_response, "file send failed")
         except Exception as exc:
             logger.error("[Feishu] Failed to send file %s: %s", file_path, (shown := describe_proxy_error(exc, env_proxy_for_redaction(_onboard_open_base_url(self._domain_name)))) or exc, exc_info=not shown)
@@ -3701,16 +3680,36 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
+        if thread_id and not effective_reply_to:
+            # Feishu rejects receive_id_type=thread_id (99992402). Reply in-topic
+            # instead; without an anchor, post to the chat top-level (loud, not silent).
+            # This also covers the former audio-only 99992402 retry — that error was
+            # this illegal receive_id_type, not an audio-specific API quirk.
+            effective_reply_to = await self._fetch_last_message_in_thread(thread_id)
+            if not effective_reply_to:
+                logger.warning(
+                    "[Feishu] Topic %s has no message anchor; posting to chat %s top-level. "
+                    "The message will not appear in the topic.",
+                    thread_id, chat_id,
+                )
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload, msg_type=msg_type, reply_in_thread=bool(thread_id), uuid_value=str(uuid.uuid4()),
             )
             request = self._build_reply_message_request(effective_reply_to, body)
-            return await self._run_blocking(self._client.im.v1.message.reply, request)
-        if thread_id:
-            # reply→create fallback inside a topic: thread_id as receive_id keeps it in the topic.
-            receive_id, receive_id_type = thread_id, "thread_id"
-        elif chat_id.startswith("feishu_user_id:"):
+            response = await self._run_blocking(self._client.im.v1.message.reply, request)
+            if self._response_succeeded(response) or not thread_id:
+                return response
+            # Withdrawn/missing reply target: return the failure so
+            # `_feishu_send_with_retry` can skip a top-level create that
+            # would open a new topic. Other reply errors fall through.
+            if getattr(response, "code", None) in _FEISHU_REPLY_FALLBACK_CODES:
+                return response
+            logger.warning(
+                "[Feishu] In-topic reply failed for thread %s; posting to chat %s top-level.",
+                thread_id, chat_id,
+            )
+        if chat_id.startswith("feishu_user_id:"):
             receive_id, receive_id_type = chat_id.split(":", 1)[1], "user_id"
         else:
             receive_id, receive_id_type = chat_id, "open_id" if chat_id.startswith("ou_") else "chat_id"
