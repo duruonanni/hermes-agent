@@ -589,3 +589,63 @@ class SessionMaintenanceMixin:
         finally:
             _release_auto_maintenance_lock(maintenance_lock)
         return result
+
+    def maybe_trim_settled_results(
+        self, min_interval_hours: int = 24, older_than: Optional[float] = None,
+        vacuum: bool = True, min_vacuum_interval_days: int = 30,
+        min_vacuum_freelist_ratio: float = AUTO_VACUUM_MIN_FREELIST_RATIO,
+    ) -> dict[str, Any]:
+        """Idempotent, never-raising reclaim of settled admission results past the exact-retry
+        horizon (``RETRY_HORIZON_S``), for sessions that are still alive.
+
+        Independent of ``sessions.auto_prune``: this deletes no session and no message, only the
+        per-turn replay blobs a live session would otherwise keep forever. Runs at most once per
+        ``min_interval_hours`` (marker ``last_settled_result_prune``); after a reclaim VACUUM is
+        offered on its own throttle and skips under a live foreign writer, like auto-maintenance.
+        """
+        from hermes_state_mutation_retirement import RETRY_HORIZON_S, trim_settled_results
+        from hermes_state_repair import _release_auto_maintenance_lock, _try_acquire_auto_maintenance_lock
+        result: dict[str, Any] = {"skipped": False, "trimmed": 0, "vacuumed": False}
+        maintenance_lock = _try_acquire_auto_maintenance_lock(self.db_path)
+        if maintenance_lock is None:
+            result["skipped"] = True
+            return result
+        try:
+            now = time.time()
+            since = _seconds_since(now, self.get_meta("last_settled_result_trim"))
+            if since is not None and since < min_interval_hours * 3600:
+                result["skipped"] = True
+                return result
+            horizon = RETRY_HORIZON_S if older_than is None else older_than
+            report_startup_progress(900.0, phase="state_db_settled_result_trim")
+            result["trimmed"] = self._execute_write(lambda conn: trim_settled_results(conn, horizon))
+            if result["trimmed"]:
+                logger.info("state.db settled-result trim: trimmed %d stored result(s) older than %ds",
+                            result["trimmed"], horizon)
+            since_vacuum = _seconds_since(now, self.get_meta("last_vacuum"))
+            vacuum_due = since_vacuum is None or since_vacuum >= min_vacuum_interval_days * 86400
+            if vacuum and result["trimmed"] and vacuum_due:
+                from hermes_state_holders import foreign_state_db_holders, in_process_state_db_holders
+                holders = (foreign_state_db_holders(self.db_path)
+                           + in_process_state_db_holders(self.db_path, exclude=self))
+                ratio = self._freelist_ratio()
+                if holders:
+                    result["vacuum_skipped_holders"] = len(holders)
+                elif ratio is None or ratio > min_vacuum_freelist_ratio:
+                    try:
+                        report_startup_progress(900.0, phase="state_db_settled_result_vacuum")
+                        self.vacuum()
+                        result["vacuumed"] = True
+                        self.set_meta("last_vacuum", str(now))
+                    except Exception as exc:
+                        logger.warning("state.db VACUUM after settled-result prune failed: %s", exc)
+                else:
+                    result["freelist_ratio"] = ratio
+            self.set_meta("last_settled_result_trim", str(now))
+        except Exception as exc:
+            # Maintenance must never block a turn or startup.
+            logger.warning("state.db settled-result trim failed: %s", exc)
+            result["error"] = str(exc)
+        finally:
+            _release_auto_maintenance_lock(maintenance_lock)
+        return result

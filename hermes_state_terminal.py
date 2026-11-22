@@ -6,6 +6,7 @@ Worker receipt reads additionally require the original private adoption proof.
 """
 import hmac
 import json
+import time
 
 from hermes_state_runtime import ADMITTED_REQUEST_CONFLICT, RuntimeStoreError, _epoch, _json, _row, _secret_digest, _text, admission_fingerprint
 
@@ -48,6 +49,23 @@ def compact_result(result, *, user_message=None):
             value.pop('current_turn_user_idx', None)
     result['result'] = value
     return result
+
+
+#: Sibling key recording when a settlement's result was stored (unix seconds, as text). It lives
+#: beside the result row rather than inside its payload, so the stored-result contract and its
+#: exact-equality readers stay untouched; ``prune_settled_results`` ages a LIVE session's results
+#: by it. Written once per admission (first settlement wins -- a rewrite never extends its life).
+SETTLED_PREFIX = 'gateway.admission.settled_at.v1.'
+
+
+def settled_key(admission_id):
+    return SETTLED_PREFIX + admission_id
+
+
+def stamp_settled(conn, admission_id, *, now=None):
+    """Record a settlement's time. Idempotent: an existing stamp is kept."""
+    conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING',
+                 (settled_key(admission_id), str(int(time.time() if now is None else now))))
 
 
 # Top-level row key only ``encode_result`` writes. The row's top level is built by the gateway

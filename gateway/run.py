@@ -4324,10 +4324,19 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
     from hermes_cli.config import load_config as _load_full_config
     from hermes_state_registry import acquire, release_or_close
     _sess_cfg = (_load_full_config().get("sessions") or {})
-    if not (_sess_cfg.get("auto_archive", False) or _sess_cfg.get("auto_prune", False)):
+    # Settled-result reclaim is not session pruning: it drops a live session's per-turn replay
+    # blobs once they are past the exact-retry horizon, so it runs even with auto_prune off
+    # (opt out with sessions.trim_settled_results: false). Its own throttle lives in the store.
+    _gc_results = bool(_sess_cfg.get("trim_settled_results", True))
+    if not (_sess_cfg.get("auto_archive", False) or _sess_cfg.get("auto_prune", False) or _gc_results):
         return
     _adb = acquire()
     try:
+        if _gc_results:
+            _adb.maybe_trim_settled_results(
+                min_interval_hours=int(_sess_cfg.get("min_interval_hours", 24)),
+                min_vacuum_interval_days=int(_sess_cfg.get("min_vacuum_interval_days", 30)),
+                vacuum=bool(_sess_cfg.get("vacuum_after_prune", True)))
         if _sess_cfg.get("auto_archive", False):
             _adb.maybe_auto_archive(
                 idle_days=float(_sess_cfg.get("auto_archive_days", 3)),
